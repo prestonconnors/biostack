@@ -1,0 +1,14 @@
+# --- Secrets & Keys (NEVER UPLOAD) ---
+.env
+credentials.json
+google_token.json
+whoop_tokens.json
+
+# --- Temporary Data ---
+temp_downloads/
+__pycache__/
+
+# --- Virtual Environment (Don't upload library files) ---
+venv/
+.venv/
+biostack_env/
