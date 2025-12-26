@@ -1,0 +1,16 @@
+# --- Core API & Environment ---
+requests
+boto3
+python-dotenv
+
+# --- Google APIs (Vitals/Sheet) ---
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+
+# --- Web Automation & Data (Nutrition) ---
+selenium
+webdriver-manager
+pandas
+openpyxl
+xlrd
