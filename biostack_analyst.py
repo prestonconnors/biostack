@@ -3,6 +3,7 @@ import json
 import boto3
 import argparse
 import pandas as pd
+import numpy as np
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -14,7 +15,7 @@ def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--start', type=str, help='Start Date YYYY-MM-DD')
     parser.add_argument('--end', type=str, help='End Date YYYY-MM-DD')
-    parser.add_argument('--days', type=int, default=7, help='Days back to analyze (default: 7)')
+    parser.add_argument('--days', type=int, default=7, help='Days back')
     return parser.parse_args()
 
 def get_s3_client():
@@ -26,153 +27,195 @@ def get_s3_client():
     )
 
 def get_latest_file_content(s3, folder):
-    """ Finds the most recently uploaded file in a specific S3 folder and reads it """
+    """ Reads newest S3 JSON file """
     try:
         response = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix=folder)
         if 'Contents' not in response:
-            print(f"⚠️  No data found in '{folder}/'")
-            return []
-        
-        # Sort by LastModified date (newest last)
+            return None 
         files = sorted(response['Contents'], key=lambda x: x['LastModified'])
         latest_file = files[-1]['Key']
-        
-        print(f"   Reading latest {folder} file: {latest_file}...")
+        print(f"   Reading {folder}: {latest_file}...")
         
         obj = s3.get_object(Bucket=BUCKET_NAME, Key=latest_file)
-        content = json.loads(obj['Body'].read().decode('utf-8'))
-        return content
+        return json.loads(obj['Body'].read().decode('utf-8'))
     except Exception as e:
-        print(f"❌ Error reading {folder}: {e}")
-        return []
+        print(f"⚠️  Error reading {folder}: {e}")
+        return None
 
-def filter_data_by_date(data, start_date, end_date):
-    """ Converts list of dicts to DataFrame and filters by date range """
-    if not data:
+# --- POWER TOOLS: PRE-PROCESSING FUNCTIONS ---
+
+def flatten_and_filter(data_list, start_date, end_date):
+    """
+    1. Converts dict-of-dicts to flat DataFrame using json_normalize
+    2. Intelligent Date filtering
+    """
+    if not data_list or not isinstance(data_list, list):
         return pd.DataFrame()
+
+    # MAGIC LINE: Flattens nested 'score.strain' -> 'score_strain'
+    df = pd.json_normalize(data_list, sep='_')
     
-    df = pd.DataFrame(data)
-    
-    # Intelligent Date Detection
+    # Standardize Column Names (remove prefix/suffix clutter)
+    df.columns = [c.replace('score_', '').replace('stage_summary_', '').lower() for c in df.columns]
+
+    # Date Hunt
     date_col = None
-    possible_names = ['date', 'Date', 'cycle', 'Cycle', 'entryDate', 'day']
+    candidates = ['start', 'created_at', 'date', 'entrydate', 'cycle']
+    for c in df.columns:
+        if any(name in c for name in candidates):
+            date_col = c
+            # Break if we found a high quality one
+            if 'start' in c or 'date' in c: break
     
-    for col in df.columns:
-        if any(name in col for name in possible_names):
-            date_col = col
-            break
-            
     if not date_col:
-        print("⚠️  Warning: Could not find a date column in data. Using all data.")
         return df
 
-    # Normalize Dates
-    # Some dates are ISO strings, some are simple YYYY-MM-DD
-    df[date_col] = pd.to_datetime(df[date_col], errors='coerce').dt.tz_localize(None) # Remove timezone for easy compare
-    
-    # Filter
-    # Ensure strict comparison by normalizing filter dates to midnight
-    start = pd.to_datetime(start_date).replace(hour=0, minute=0, second=0, microsecond=0)
-    end = pd.to_datetime(end_date).replace(hour=23, minute=59, second=59, microsecond=999999)
-    
-    mask = (df[date_col] >= start) & (df[date_col] <= end)
-    filtered = df.loc[mask]
-    
-    return filtered
-
-def generate_prompt(whoop_df, nutrition_df, vitals_df, start_date, end_date):
-    """ Constructs the Engineering Prompt """
-    
-    # Prepare Aggregates
-    stats = []
-    
-    if not whoop_df.empty:
-        # Whoop: Interested in Avg Recovery, Strain, Sleep
-        # Flatten structure if nested? Usually MyNetDiary/Whoop flat structures work best
-        stats.append(f"## WHOOP DATA (Physiology)\n{whoop_df.to_markdown(index=False)}")
-    else:
-        stats.append("## WHOOP DATA\n(No data found for this period)")
-
-    if not nutrition_df.empty:
-        # Select key columns to keep token count low if desired
-        # If massive, maybe group by date?
-        # For now, we dump the log
-        cols = [c for c in nutrition_df.columns if 'date' in c.lower() or 'cal' in c.lower() or 'prot' in c.lower() or 'fat' in c.lower() or 'carb' in c.lower()]
-        display_df = nutrition_df[cols] if cols else nutrition_df
-        stats.append(f"## NUTRITION DATA\n{display_df.to_markdown(index=False)}")
-    else:
-        stats.append("## NUTRITION DATA\n(No data found for this period)")
+    # Filter by Date
+    try:
+        df[date_col] = pd.to_datetime(df[date_col], errors='coerce').dt.tz_localize(None)
         
-    if not vitals_df.empty:
-        stats.append(f"## VITALS & BODY DATA\n{vitals_df.to_markdown(index=False)}")
+        # Create a clean string 'Day' column for the AI
+        df['day_str'] = df[date_col].dt.strftime('%Y-%m-%d')
+        
+        start = pd.to_datetime(start_date).replace(tzinfo=None)
+        end = pd.to_datetime(end_date).replace(tzinfo=None) + timedelta(days=1)
+        
+        mask = (df[date_col] >= start) & (df[date_col] < end)
+        df_filtered = df.loc[mask].copy()
+        
+        # Clean up the original dirty timestamp column to save tokens
+        # The AI only needs 'day_str' usually
+        return df_filtered.sort_values(by=date_col)
+    except:
+        return df
+
+def aggregate_nutrition_dailies(df):
+    """ Calculates Daily Macro Totals so ChatGPT doesn't have to add """
+    if df.empty: return df, df
+
+    # Identifying relevant numeric columns
+    numeric_cols = ['calories', 'protein', 'fat', 'carbs', 'sugars', 'sodium', 'fiber', 'amount']
+    # Filter only columns that actually exist
+    cols_to_sum = [c for c in df.columns if any(x in c for x in numeric_cols)]
+    
+    # 1. DAILY SUMS
+    if 'day_str' in df.columns:
+        # Sum numeric columns by day
+        # using 'min_count=0' ensures days present return 0 instead of NaN if empty
+        daily_sums = df.groupby('day_str')[cols_to_sum].sum(numeric_only=True).reset_index()
     else:
-        stats.append("## VITALS DATA\n(No data found for this period)")
+        daily_sums = pd.DataFrame()
 
-    # Construct the Prompt Text
-    prompt = f"""
-I am going to provide you with my personal health data for the period of {start_date.date()} to {end_date.date()}.
+    # 2. RAW LOGS (Cleaned)
+    # Only keep high-value columns for the "Event Log"
+    keep_cols = ['day_str', 'name', 'meal', 'amount', 'calories', 'protein', 'fat', 'carbs']
+    existing_keeps = [c for c in keep_cols if c in df.columns]
+    raw_logs = df[existing_keeps].copy()
 
-ROLE:
-Act as an elite Performance Coach and Clinical Nutritionist. Your goal is to analyze the correlations between my INPUTS (Nutrition) and my OUTPUTS (Whoop recovery, Strain, Weight, Blood Pressure, Skeletal Muscle Mass).
+    return daily_sums, raw_logs
 
-DATA:
+def clean_whoop_cycles(df):
+    """ Selects only high-signal columns for Cycle Summary """
+    if df.empty: return df
+    
+    keep = ['day_str', 'strain', 'kilojoule', 'average_heart_rate', 'max_heart_rate', 'recovery_score', 
+            'hrv_rmssd_milli', 'resting_heart_rate', 'spo2_percentage', 'sleep_performance_percentage', 
+            'sleep_efficiency_percentage', 'total_in_bed_time_milli']
+    
+    # Find which ones exist
+    valid = [c for c in keep if c in df.columns]
+    
+    # Add simple conversions (e.g. milliseconds to hours)
+    clean_df = df[valid].copy()
+    if 'total_in_bed_time_milli' in clean_df.columns:
+        clean_df['hours_sleep'] = round(clean_df['total_in_bed_time_milli'] / (1000 * 60 * 60), 2)
+        clean_df = clean_df.drop(columns=['total_in_bed_time_milli'])
 
-{stats[0]}
+    return clean_df
 
-{stats[1]}
-
-{stats[2]}
-
-TASK:
-1. **Trend Analysis:** Identify specific patterns between my nutrition/macros and my next-day recovery or blood pressure.
-2. **Anomaly Detection:** Highlight any days where vitals deviated significantly and hypothesize the cause based on the other data.
-3. **Actionable Protocol:** Based on this specific week of data, provide 3 distinct actionable steps for next week to optimize recovery and body composition (Muscle Mass).
-"""
-    return prompt
+def to_minified_json(df):
+    """ Converts DF to string, handling NaNs and decimals """
+    if df.empty: return "[]"
+    # Round floats to 2 decimals to save tokens
+    df = df.round(2)
+    return df.to_json(orient='records')
 
 def main():
     args = get_args()
     
-    # Calculate Dates
+    # Dates
     if args.end:
         end_date = datetime.strptime(args.end, '%Y-%m-%d')
     else:
         end_date = datetime.now()
-
     if args.start:
         start_date = datetime.strptime(args.start, '%Y-%m-%d')
     else:
         start_date = end_date - timedelta(days=args.days)
         
-    print(f"📊 Analyzing BioStack Data: {start_date.date()} -> {end_date.date()}...\n")
+    print(f"🧠 Biostack Analyst: {start_date.date()} -> {end_date.date()}")
+    print("   (Fetching -> Flattening -> Aggregating)")
 
     s3 = get_s3_client()
     
-    # 1. Fetch Latest Dumps
     raw_whoop = get_latest_file_content(s3, 'whoop')
     raw_nutrition = get_latest_file_content(s3, 'nutrition')
     raw_vitals = get_latest_file_content(s3, 'vitals')
-    
-    # 2. Filter to Timeframe
-    whoop_df = filter_data_by_date(raw_whoop, start_date, end_date)
-    nutrition_df = filter_data_by_date(raw_nutrition, start_date, end_date)
-    vitals_df = filter_data_by_date(raw_vitals, start_date, end_date)
-    
-    print(f"   Found {len(whoop_df)} Whoop logs.")
-    print(f"   Found {len(nutrition_df)} Nutrition logs.")
-    print(f"   Found {len(vitals_df)} Vitals logs.")
-    
-    # 3. Build Prompt
-    final_prompt = generate_prompt(whoop_df, nutrition_df, vitals_df, start_date, end_date)
-    
-    # 4. Output
+
+    prompt_data = []
+
+    # --- 1. PRE-PROCESS NUTRITION ---
+    if raw_nutrition:
+        # Step A: Flatten Log
+        flat_nut = flatten_and_filter(raw_nutrition, start_date, end_date)
+        
+        # Step B: Create Summary Table vs Event Log
+        daily_macros, event_log = aggregate_nutrition_dailies(flat_nut)
+        
+        if not daily_macros.empty:
+            prompt_data.append(f"<data name='nutrition_daily_totals'>\n{to_minified_json(daily_macros)}\n</data>")
+        if not event_log.empty:
+            prompt_data.append(f"<data name='nutrition_raw_log'>\n{to_minified_json(event_log)}\n</data>")
+
+    # --- 2. PRE-PROCESS WHOOP ---
+    if raw_whoop and isinstance(raw_whoop, dict):
+        for category, records in raw_whoop.items():
+            # Flatten (un-nest 'score' keys)
+            df_flat = flatten_and_filter(records, start_date, end_date)
+            
+            # Specialized cleaning per type
+            if category == 'recovery' or category == 'cycles' or category == 'sleep':
+                df_flat = clean_whoop_cycles(df_flat)
+
+            prompt_data.append(f"<data name='whoop_{category}'>\n{to_minified_json(df_flat)}\n</data>")
+            
+    # --- 3. PRE-PROCESS VITALS ---
+    if raw_vitals:
+        df_vitals = flatten_and_filter(raw_vitals, start_date, end_date)
+        prompt_data.append(f"<data name='vitals'>\n{to_minified_json(df_vitals)}\n</data>")
+
+    # --- 4. CONSTRUCT THE SUPER PROMPT ---
+    final_prompt = f"""
+I am an elite performance coach. I have pre-calculated your daily statistics to analyze your correlations faster.
+
+### MISSION
+1. Review the **Daily Totals** for trends (Load vs Recovery vs Calories).
+2. Scan the **Raw Logs** only for specific details (e.g. "What meal caused the high sugar spike?").
+3. Analyze `whoop_recovery` lag: Compare NUTRITION on Day X to RECOVERY on Day X+1.
+4. Provide 3 specific protocols for next week.
+
+---
+PRE-PROCESSED DATASET:
+
+{chr(10).join(prompt_data)}
+"""
+
     filename = "biostack_prompt.txt"
     with open(filename, "w", encoding='utf-8') as f:
         f.write(final_prompt)
-        
-    print(f"\n✅ Prompt generated! saved to: {filename}")
-    print("-" * 30)
-    print("Next step: Open 'biostack_prompt.txt', Copy All, and Paste into ChatGPT.")
+    
+    print(f"\n✅ OPTIMIZED PROMPT SAVED: {filename}")
+    print("   -> Data is flattened and summed. Thinking time should be minimized.")
 
 if __name__ == "__main__":
     main()
