@@ -1,58 +1,60 @@
 #!/bin/bash
 
-# 1. Dynamically find the folder this script is sitting in
-#    This allows the script to run correctly even if called via Cron from a different path.
-PROJECT_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+# 1. PREP: Set Directory to Script Location (Robust for Cron)
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+cd "$SCRIPT_DIR"
 
-# 2. Go to that directory
-cd "$PROJECT_ROOT"
-
-# 3. Smart Python Detection
-#    Checks standard locations for the virtual environment
-if [ -f "$PROJECT_ROOT/venv/bin/python" ]; then
-    PYTHON_BIN="$PROJECT_ROOT/venv/bin/python"
-elif [ -f "$PROJECT_ROOT/.venv/bin/python" ]; then
-    PYTHON_BIN="$PROJECT_ROOT/.venv/bin/python"
+# 2. ACTIVATE PYTHON VENV
+# Tries standard location name 'venv'
+if [ -d "venv" ]; then
+    source venv/bin/activate
+elif [ -d ".venv" ]; then
+    source .venv/bin/activate
 else
-    # Fallback to system python if no venv found
-    echo "⚠️  Virtual Environment not detected. Using system python3."
-    PYTHON_BIN="python3"
+    echo "⚠️  Warning: Virtual Environment 'venv' not found. Trying global python..."
 fi
 
-# 4. Safety Check for Credentials
-if [ ! -f ".env" ]; then
-    echo "❌ CRITICAL: No .env file found in $PROJECT_ROOT."
-    echo "   Please create one (or rename .env.example) before running."
-    exit 1
-fi
+# 3. ARGUMENT PARSING (Default: 8 days for full weekly overlap)
+DAYS=8
 
-# 5. Execution
-echo "================================================"
-echo "🚀 Starting BioStack Run"
-echo "📅 Date: $(date)"
-echo "📂 Location: $PROJECT_ROOT"
-echo "🐍 Python: $PYTHON_BIN"
-echo "================================================"
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --days) DAYS="$2"; shift ;;
+        *) echo "Unknown parameter passed: $1"; exit 1 ;;
+    esac
+    shift
+done
 
-# Execute Scripts
-echo ">> Step 1: Fetching Whoop Data..."
-$PYTHON_BIN biostack_whoop.py --days 8
-echo "--------------------------------"
+echo "=========================================="
+echo "🧬 BIOSTACK: Starting Sync for past $DAYS days"
+echo "   Date: $(date)"
+echo "   Path: $(pwd)"
+echo "=========================================="
 
-echo ">> Step 2: Fetching Nutrition Data..."
-$PYTHON_BIN biostack_nutrition.py --days 8
-echo "--------------------------------"
+# 4. EXECUTE GATHERERS (Continue even if one fails)
+echo ""
+echo "--- 1. FETCHING WHOOP DATA ---"
+python biostack_whoop.py --days "$DAYS"
 
-echo ">> Step 3: Fetching Vitals Data..."
-$PYTHON_BIN biostack_vitals.py --days 8
-echo "--------------------------------"
+echo ""
+echo "--- 2. FETCHING MYNETDIARY ---"
+# Note: Selenium can be flaky; ensure display args or headless mode are set in py script
+python biostack_nutrition.py --days "$DAYS"
 
-echo ">> Step 4: Analyzing Data & Generating Prompt..."
-$PYTHON_BIN biostack_analyst.py --days 8
-echo "--------------------------------"
+echo ""
+echo "--- 3. FETCHING GOOGLE SHEETS ---"
+python biostack_vitals.py --days "$DAYS"
 
-echo ">> Step 5: Uploading to Google Drive..."
-$PYTHON_BIN biostack_drive.py --days 8
-echo "--------------------------------"
+# 5. EXECUTE ANALYSIS (The Brain)
+echo ""
+echo "--- 4. ANALYZING DATA & PREPPING PROMPT ---"
+# You can also pass a template here if you want to hardcode one, e.g. --template templates/coach.txt
+python biostack_analyst.py --days "$DAYS"
 
-echo "✅ Run Complete. Results saved to $PROJECT_ROOT/biostack_prompt.txt"
+# 6. DELIVERY
+echo ""
+echo "--- 5. UPLOADING TO DRIVE ---"
+python biostack_drive.py --days "$DAYS"
+
+echo ""
+echo "✅ DONE. Pipeline Finished."
