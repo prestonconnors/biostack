@@ -52,7 +52,7 @@ $PYTHON_BIN biostack_analyst.py --days 8
 echo "--------------------------------"
 
 echo ">> Step 5: Uploading to Google Drive..."
-$PYTHON_BIN biostack_drive.py
+$PYTHON_BIN biostack_drive.py --days 8
 echo "--------------------------------"
 
 echo "✅ Run Complete. Results saved to $PROJECT_ROOT/biostack_prompt.txt"
