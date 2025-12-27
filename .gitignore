@@ -3,6 +3,7 @@
 credentials.json
 google_token.json
 whoop_tokens.json
+drive_token.json
 biostack_prompt.txt
 
 # --- Temporary Data ---
