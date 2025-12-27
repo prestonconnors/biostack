@@ -2,6 +2,7 @@
 requests
 boto3
 python-dotenv
+tabulate
 
 # --- Google APIs (Vitals/Sheet) ---
 google-api-python-client
