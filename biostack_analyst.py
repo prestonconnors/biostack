@@ -3,7 +3,6 @@ import json
 import boto3
 import argparse
 import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -16,6 +15,9 @@ def get_args():
     parser.add_argument('--start', type=str, help='Start Date YYYY-MM-DD')
     parser.add_argument('--end', type=str, help='End Date YYYY-MM-DD')
     parser.add_argument('--days', type=int, default=7, help='Days back')
+    # NEW ARGUMENT
+    parser.add_argument('--template', type=str, default='templates/default_coach.txt', 
+                        help='Path to text file containing prompt logic (must include {{DATASET}} placeholder)')
     return parser.parse_args()
 
 def get_s3_client():
@@ -52,29 +54,21 @@ def flatten_and_filter(data_list, start_date, end_date):
     if not data_list or not isinstance(data_list, list):
         return pd.DataFrame()
 
-    # MAGIC LINE: Flattens nested 'score.strain' -> 'score_strain'
     df = pd.json_normalize(data_list, sep='_')
-    
-    # Standardize Column Names (remove prefix/suffix clutter)
     df.columns = [c.replace('score_', '').replace('stage_summary_', '').lower() for c in df.columns]
 
-    # Date Hunt
     date_col = None
     candidates = ['start', 'created_at', 'date', 'entrydate', 'cycle']
     for c in df.columns:
         if any(name in c for name in candidates):
             date_col = c
-            # Break if we found a high quality one
             if 'start' in c or 'date' in c: break
     
     if not date_col:
         return df
 
-    # Filter by Date
     try:
         df[date_col] = pd.to_datetime(df[date_col], errors='coerce').dt.tz_localize(None)
-        
-        # Create a clean string 'Day' column for the AI
         df['day_str'] = df[date_col].dt.strftime('%Y-%m-%d')
         
         start = pd.to_datetime(start_date).replace(tzinfo=None)
@@ -82,32 +76,22 @@ def flatten_and_filter(data_list, start_date, end_date):
         
         mask = (df[date_col] >= start) & (df[date_col] < end)
         df_filtered = df.loc[mask].copy()
-        
-        # Clean up the original dirty timestamp column to save tokens
-        # The AI only needs 'day_str' usually
         return df_filtered.sort_values(by=date_col)
     except:
         return df
 
 def aggregate_nutrition_dailies(df):
-    """ Calculates Daily Macro Totals so ChatGPT doesn't have to add """
+    """ Calculates Daily Macro Totals """
     if df.empty: return df, df
 
-    # Identifying relevant numeric columns
     numeric_cols = ['calories', 'protein', 'fat', 'carbs', 'sugars', 'sodium', 'fiber', 'amount']
-    # Filter only columns that actually exist
     cols_to_sum = [c for c in df.columns if any(x in c for x in numeric_cols)]
     
-    # 1. DAILY SUMS
     if 'day_str' in df.columns:
-        # Sum numeric columns by day
-        # using 'min_count=0' ensures days present return 0 instead of NaN if empty
         daily_sums = df.groupby('day_str')[cols_to_sum].sum(numeric_only=True).reset_index()
     else:
         daily_sums = pd.DataFrame()
 
-    # 2. RAW LOGS (Cleaned)
-    # Only keep high-value columns for the "Event Log"
     keep_cols = ['day_str', 'name', 'meal', 'amount', 'calories', 'protein', 'fat', 'carbs']
     existing_keeps = [c for c in keep_cols if c in df.columns]
     raw_logs = df[existing_keeps].copy()
@@ -122,11 +106,9 @@ def clean_whoop_cycles(df):
             'hrv_rmssd_milli', 'resting_heart_rate', 'spo2_percentage', 'sleep_performance_percentage', 
             'sleep_efficiency_percentage', 'total_in_bed_time_milli']
     
-    # Find which ones exist
     valid = [c for c in keep if c in df.columns]
-    
-    # Add simple conversions (e.g. milliseconds to hours)
     clean_df = df[valid].copy()
+    
     if 'total_in_bed_time_milli' in clean_df.columns:
         clean_df['hours_sleep'] = round(clean_df['total_in_bed_time_milli'] / (1000 * 60 * 60), 2)
         clean_df = clean_df.drop(columns=['total_in_bed_time_milli'])
@@ -134,16 +116,24 @@ def clean_whoop_cycles(df):
     return clean_df
 
 def to_minified_json(df):
-    """ Converts DF to string, handling NaNs and decimals """
     if df.empty: return "[]"
-    # Round floats to 2 decimals to save tokens
     df = df.round(2)
     return df.to_json(orient='records')
+
+def load_template_string(path):
+    """ Safe Loader for Template """
+    if os.path.exists(path):
+        print(f"📄 Using Prompt Template: {path}")
+        with open(path, 'r', encoding='utf-8') as f:
+            return f.read()
+    else:
+        print(f"⚠️ Template file not found: {path}")
+        print("   -> Fallback: Using default internal minimal prompt.")
+        return """DATA ANALYSIS REQUEST:\n\n{{DATASET}}"""
 
 def main():
     args = get_args()
     
-    # Dates
     if args.end:
         end_date = datetime.strptime(args.end, '%Y-%m-%d')
     else:
@@ -154,68 +144,52 @@ def main():
         start_date = end_date - timedelta(days=args.days)
         
     print(f"🧠 Biostack Analyst: {start_date.date()} -> {end_date.date()}")
-    print("   (Fetching -> Flattening -> Aggregating)")
-
-    s3 = get_s3_client()
     
+    s3 = get_s3_client()
     raw_whoop = get_latest_file_content(s3, 'whoop')
     raw_nutrition = get_latest_file_content(s3, 'nutrition')
     raw_vitals = get_latest_file_content(s3, 'vitals')
 
     prompt_data = []
 
-    # --- 1. PRE-PROCESS NUTRITION ---
+    # --- 1. NUTRITION ---
     if raw_nutrition:
-        # Step A: Flatten Log
         flat_nut = flatten_and_filter(raw_nutrition, start_date, end_date)
-        
-        # Step B: Create Summary Table vs Event Log
         daily_macros, event_log = aggregate_nutrition_dailies(flat_nut)
-        
         if not daily_macros.empty:
             prompt_data.append(f"<data name='nutrition_daily_totals'>\n{to_minified_json(daily_macros)}\n</data>")
         if not event_log.empty:
             prompt_data.append(f"<data name='nutrition_raw_log'>\n{to_minified_json(event_log)}\n</data>")
 
-    # --- 2. PRE-PROCESS WHOOP ---
+    # --- 2. WHOOP ---
     if raw_whoop and isinstance(raw_whoop, dict):
         for category, records in raw_whoop.items():
-            # Flatten (un-nest 'score' keys)
             df_flat = flatten_and_filter(records, start_date, end_date)
-            
-            # Specialized cleaning per type
-            if category == 'recovery' or category == 'cycles' or category == 'sleep':
+            if category in ['recovery', 'cycles', 'sleep']:
                 df_flat = clean_whoop_cycles(df_flat)
-
             prompt_data.append(f"<data name='whoop_{category}'>\n{to_minified_json(df_flat)}\n</data>")
             
-    # --- 3. PRE-PROCESS VITALS ---
+    # --- 3. VITALS ---
     if raw_vitals:
         df_vitals = flatten_and_filter(raw_vitals, start_date, end_date)
         prompt_data.append(f"<data name='vitals'>\n{to_minified_json(df_vitals)}\n</data>")
 
-    # --- 4. CONSTRUCT THE SUPER PROMPT ---
-    final_prompt = f"""
-I am an elite performance coach. I have pre-calculated your daily statistics to analyze your correlations faster.
-
-### MISSION
-1. Review the **Daily Totals** for trends (Load vs Recovery vs Calories).
-2. Scan the **Raw Logs** only for specific details (e.g. "What meal caused the high sugar spike?").
-3. Analyze `whoop_recovery` lag: Compare NUTRITION on Day X to RECOVERY on Day X+1.
-4. Provide 3 specific protocols for next week.
-
----
-PRE-PROCESSED DATASET:
-
-{chr(10).join(prompt_data)}
-"""
+    # --- 4. CONSTRUCT PROMPT FROM TEMPLATE ---
+    data_block = "\n".join(prompt_data)
+    template_content = load_template_string(args.template)
+    
+    # Safe Replacement (Use .replace, not f-string, to avoid curly brace errors in templates)
+    if "{{DATASET}}" in template_content:
+        final_prompt = template_content.replace("{{DATASET}}", data_block)
+    else:
+        # Fallback if user forgot the tag
+        final_prompt = template_content + "\n\n" + data_block
 
     filename = "biostack_prompt.txt"
     with open(filename, "w", encoding='utf-8') as f:
         f.write(final_prompt)
     
     print(f"\n✅ OPTIMIZED PROMPT SAVED: {filename}")
-    print("   -> Data is flattened and summed. Thinking time should be minimized.")
 
 if __name__ == "__main__":
     main()
