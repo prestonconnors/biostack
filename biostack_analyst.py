@@ -174,7 +174,13 @@ def main():
         df_vitals = flatten_and_filter(raw_vitals, start_date, end_date)
         prompt_data.append(f"<data name='vitals'>\n{to_minified_json(df_vitals)}\n</data>")
 
-    # --- 4. CONSTRUCT PROMPT FROM TEMPLATE ---
+    # --- 4. SOCIAL TWEETS ---
+    raw_social = get_latest_file_content(s3, 'social')
+    if raw_social:
+        # We don't need much filtering here as the fetcher already did it
+        prompt_data.append(f"<data name='social_expert_feed'>\n{json.dumps(raw_social)}\n</data>")
+
+    # --- 5. CONSTRUCT PROMPT FROM TEMPLATE ---
     data_block = "\n".join(prompt_data)
     template_content = load_template_string(args.template)
     

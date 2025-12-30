@@ -45,6 +45,10 @@ echo ""
 echo "--- 3. FETCHING GOOGLE SHEETS ---"
 python biostack_vitals.py --days "$DAYS"
 
+echo ""
+echo "--- 3. FETCHING SOCIAL POSTS ---"
+python biostack_social.py --days 7
+
 # 5. EXECUTE ANALYSIS (The Brain)
 echo ""
 echo "--- 4. ANALYZING DATA & PREPPING PROMPT ---"
