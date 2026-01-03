@@ -19,41 +19,51 @@ load_dotenv()
 
 # --- CONFIG ---
 BUCKET_NAME = os.getenv('BIOSTACK_BUCKET_NAME')
-HANDLES = [h.strip() for h in os.getenv('X_FOLLOW_LIST', '').split(',')]
+HANDLES = [h.strip() for h in os.getenv('X_FOLLOW_LIST', '').split(',') if h.strip()]
 
-def setup_driver(headless=False):
+def get_args():
+    parser = argparse.ArgumentParser(description="BioStack Social Gatherer (Expert Intel Scraper)")
+    parser.add_argument('--days', type=int, default=7, help="How many days back to search")
+    parser.add_argument('--visible', action='store_true', help="Show browser (laptop debugging)")
+    parser.add_argument('--no-replies', action='store_true', help="Fetch main tweets ONLY (disables /with_replies)")
+    return parser.parse_args()
+
+def setup_driver(headless=True):
     chrome_options = Options()
+    
     if headless:
         chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--window-size=1920,1080")
     
-    # Fingerprint hiding
+    # Advanced Anti-Fingerprinting
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
     
     service = Service(ChromeDriverManager().install())
-    return webdriver.Chrome(service=service, options=chrome_options)
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    
+    # Obscure the automation identity
+    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+    return driver
 
 def inject_cookies(driver):
-    cookie_file = 'twitter_cookies.json'
-    if not os.path.exists(cookie_file):
-        raise Exception(f"❌ {cookie_file} not found! Export them from Chrome first.")
+    cookie_path = 'twitter_cookies.json'
+    if not os.path.exists(cookie_path):
+        raise Exception(f"❌ {cookie_path} missing! Export JSON cookies from your laptop Chrome first.")
     
-    # 1. We MUST visit the domain first to set context
-    print("🌐 Opening X to establish context...")
+    print("🌐 Establishing context at x.com...")
     driver.get("https://x.com")
     time.sleep(3)
 
-    # 2. Load and Inject
-    with open(cookie_file, 'r') as f:
+    with open(cookie_path, 'r') as f:
         cookies = json.load(f)
-        
+
     print(f"🍪 Injecting {len(cookies)} cookies...")
     for cookie in cookies:
-        # X cookies sometimes have 'expiry' or other keys Selenium dislikes
-        # We strip non-standard keys to prevent errors
         clean_cookie = {
             'name': cookie['name'],
             'value': cookie['value'],
@@ -64,62 +74,125 @@ def inject_cookies(driver):
         try:
             driver.add_cookie(clean_cookie)
         except:
-            pass # Skip incompatible cookies
-            
-    print("🔄 Refreshing to apply session...")
-    driver.refresh()
+            pass # Standard behavior for some incompatible headers
+
+    print("🔄 Session injection complete. Verifying access...")
+    driver.get("https://x.com/home")
     time.sleep(5)
+    
+    if "login" in driver.current_url:
+        print("❌ Login check failed. Re-export cookies or check X account status.")
+        return False
+    return True
+
+def scrape_handle(driver, handle, days, fetch_replies=True):
+    # Set URL: Expert activity often happens in the 'with_replies' tab
+    base_url = f"https://x.com/{handle}"
+    url = f"{base_url}/with_replies" if fetch_replies else base_url
+    
+    print(f"📡 Profile: {url}")
+    driver.get(url)
+    time.sleep(5)
+    
+    unique_tweets = {}
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    
+    scroll_attempts = 0
+    max_scrolls = 20 # Captures ~100+ tweets per user if needed
+    
+    while scroll_attempts < max_scrolls:
+        # Collect current rendered articles
+        articles = driver.find_elements(By.TAG_NAME, "article")
+        
+        older_limit_hit = False
+        
+        for art in articles:
+            try:
+                # 1. Capture Time
+                time_el = art.find_element(By.TAG_NAME, "time")
+                ts_str = time_el.get_attribute("datetime")
+                ts_dt = pd.to_datetime(ts_str).to_pydatetime()
+                
+                is_pinned = "Pinned" in art.text
+
+                # 2. Capture Text (Data-Testid matches the content block)
+                txt_el = art.find_element(By.CSS_SELECTOR, "div[data-testid='tweetText']")
+                content = txt_el.text
+                
+                # Deduplication Key
+                t_id = f"{ts_str}_{content[:25]}"
+                
+                if t_id not in unique_tweets:
+                    if ts_dt >= cutoff:
+                        unique_tweets[t_id] = {
+                            "timestamp": ts_str,
+                            "handle": f"@{handle}",
+                            "content": content.replace("\n", " ") # Clean for AI readability
+                        }
+                    elif not is_pinned:
+                        # Non-pinned tweet older than 7 days: safe to terminate
+                        older_limit_hit = True
+            except:
+                continue
+
+        if older_limit_hit:
+            print(f"   ✓ Reached {cutoff.date()} (Historical Limit)")
+            break
+
+        # Scroll incrementally
+        print(f"   ...scrolling (found {len(unique_tweets)})")
+        driver.execute_script("window.scrollBy(0, 1500);")
+        time.sleep(4) # Respect server response time
+        scroll_attempts += 1
+            
+    return list(unique_tweets.values())
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--days', type=int, default=1)
-    parser.add_argument('--visible', action='store_true')
-    args = parser.parse_args()
-
-    # If visible, we can watch it happen. If on AWS, headless.
-    driver = setup_driver(headless=not args.visible)
+    args = get_args()
+    
+    # Automation Configuration
+    headless = not args.visible
+    fetch_replies = not args.no_replies # Logic: replies are default TRUE unless --no-replies is passed
+    
+    driver = setup_driver(headless=headless)
     
     try:
-        inject_cookies(driver)
-        
-        # 🧪 Check if we actually made it to the home feed
-        if "login" in driver.current_url:
-            print("❌ Injection FAILED. You are still on the login screen. Try re-exporting cookies.")
+        # Step 1: Securely login using proven cookies
+        if not inject_cookies(driver):
             return
 
-        print("🚀 Injection SUCCESS. Starting scraping...")
-        
-        all_tweets = {}
+        final_manifest = {}
         for handle in HANDLES:
-            print(f"📡 Profile: @{handle}")
-            driver.get(f"https://x.com/{handle}")
-            time.sleep(7) # Critical for network render
-            
-            data = []
-            articles = driver.find_elements(By.TAG_NAME, "article")
-            cutoff = datetime.now(timezone.utc) - timedelta(days=args.days)
-            
-            for art in articles[:10]:
-                try:
-                    time_el = art.find_element(By.TAG_NAME, "time")
-                    dt_str = time_el.get_attribute("datetime")
-                    dt_obj = pd.to_datetime(dt_str).to_pydatetime()
-                    
-                    if dt_obj >= cutoff:
-                        text_el = art.find_element(By.CSS_SELECTOR, "div[data-testid='tweetText']")
-                        data.append({"time": dt_str, "content": text_el.text})
-                except: continue
-            
-            all_tweets[handle] = data
-            print(f"   found {len(data)}")
+            try:
+                activity = scrape_handle(driver, handle, args.days, fetch_replies=fetch_replies)
+                final_manifest[handle] = activity
+                print(f"   ✅ Gathered {len(activity)} total updates.")
+                time.sleep(5) # Cooldown between handles
+            except Exception as e:
+                print(f"   ⚠️ Could not scrape {handle}: {e}")
 
-        # S3
+        # Step 2: Storage Preparation
+        timestamp = datetime.now().strftime('%Y%m%d')
+        output_payload = json.dumps(final_manifest, indent=2)
+        
+        # Step 3: Local Backup & S3 Archive
+        with open(f"social_cache.json", "w") as f:
+            f.write(output_payload)
+
         s3 = boto3.client('s3')
-        ts = datetime.now().strftime('%Y%m%d')
-        key = f"social/social_intel_{ts}.json"
-        s3.put_object(Bucket=BUCKET_NAME, Key=key, Body=json.dumps(all_tweets))
-        print(f"\n✅ DATA UPLOADED: {key}")
+        s3_key = f"social/social_intel_{timestamp}.json"
+        
+        s3.put_object(
+            Bucket=BUCKET_NAME,
+            Key=s3_key,
+            Body=output_payload,
+            ContentType='application/json'
+        )
+        print(f"\n🚀 BIOSTACK AGENT: Social data stored at s3://{BUCKET_NAME}/{s3_key}")
 
+    except Exception as fatal:
+        print(f"❌ Script Fatality: {fatal}")
+        driver.save_screenshot("fatal_error.png")
     finally:
         driver.quit()
 

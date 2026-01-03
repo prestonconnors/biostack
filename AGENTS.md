@@ -1,60 +1,46 @@
----
-
-### 2. AGENTS.md
-*Create a file named `AGENTS.md` and paste this code.*
-
-```markdown
 # 🤖 Agent Context: BioStack
 
 ## Mission
-This codebase represents an automated Personal Health Data Lake pipeline. The goal is to gather biometrics, perform pre-computation, and prepare highly optimized context for LLM analysis.
+This codebase represents an automated Personal Health Data Lake (PHDL) and Analyst. Its purpose is to ingest high-frequency biometrics (Wearables), low-frequency biometrics (Vitals/Lab), and behavior logs (Nutrition), while correlating them against high-signal expert protocols (Social Intel).
 
 ## Core Architecture Stack
-*   **Language:** Python 3 (Scripts), Bash (Orchestration).
-*   **Infrastructure:** AWS EC2 (Runtime), AWS S3 (Storage - JSON Lake).
-*   **Auth Strategy:** Headless OAuth2 refresh flows (tokens generated locally, deployed to server).
-*   **Dependencies:** `boto3`, `selenium`, `pandas`, `google-api-python-client`, `requests`.
+*   **Storage:** AWS S3 Private "JSON-Lake." Data is tiered by type: `/whoop`, `/nutrition`, `/vitals`, and `/social`.
+*   **Infrastructure:** Optimized for Linux Headless runtime (AWS EC2/Lambda) with a Local-Manual flow for 2FA-protected endpoints.
+*   **Identity & Auth:** 
+    *   **OAuth2:** Managed refresh flows (Whoop/Google Sheets/Drive).
+    *   **Cookie Injection:** Session persistence via exported `twitter_cookies.json` to bypass X/Twitter login security blocks.
 
 ## Data Dictionary & Constraints
 
-### 1. Whoop Gatherer (`biostack_whoop.py`)
-*   **Source:** Whoop API V2.
-*   **Endpoints:** `cycles`, `recovery`, `sleep`, `workout`.
-*   **Logic:** Uses specific "offline" scope to allow infinite refresh tokens. Catches 401 errors and auto-refreshes.
-*   **Pagination:** Implements `nextToken` loop logic (Limit 25 items per page) to prevent data loss.
-*   **Output:** Aggregated V2 Master Dictionary stored in S3.
+### 1. Whoop V2 (`biostack_whoop.py`)
+*   **Model:** Fetcher for `cycles`, `recovery`, `sleep`, and `workout`.
+*   **Logic:** Uses "offline" scope for infinite background token refresh. Implements V2 pagination logic via `nextToken`.
 
-### 2. Nutrition Gatherer (`biostack_nutrition.py`)
-*   **Source:** MyNetDiary (No Public API).
-*   **Method:** Selenium Web Scraper (Headless Chrome).
-*   **Logic:**
-    1.  Log in to Web Dashboard.
-    2.  Hit hidden API endpoint: `exportData.do?year=YYYY`.
-    3.  Download XLS file.
-    4.  Use `pandas` to slice date range (Memory efficient).
-*   **Constraint:** Requires `xlrd` library for older Excel formats. Server requires `--no-sandbox` flags.
+### 2. Social Intel (`biostack_social.py`)
+*   **Source:** X/Twitter profiles via Selenium Scraper.
+*   **Stealth:** Utilizes user-agent spoofing, cookie injection (bypassing the login paywall), and virtual-scrolling logic.
+*   **Default Behavior:** Scrapes `/with_replies` by default to capture "gold nuggets" of expert interaction. 
+*   **Filter:** Strictly date-filters tweets using a UTC `datetime` object to ignore irrelevant historical data.
 
-### 3. Vitals Gatherer (`biostack_vitals.py`)
-*   **Source:** Google Sheets API.
-*   **Data Model:** Manual logs (Blood Pressure, Weight, SMM, Temp).
-*   **Logic:** Simple Read-Only range fetch. Filters dates in Python.
+### 3. Nutrition (`biostack_nutrition.py`)
+*   **Method:** Scrapes the MyNetDiary "Export Data" CSV/XLS tool using Selenium.
+*   **Cleanup:** Pandas filters the spreadsheet rows for the relevant date-range before JSON serialization.
 
-### 4. The Analyst (`biostack_analyst.py`)
-*   **Role:** Pre-processor (Compute over Token generation).
-*   **Input:** Latest JSON dumps from S3 (Whoop, Nutrition, Vitals).
-*   **Transformation Logic:**
-    1.  **Normalization:** Converts mixed V1/V2 Whoop responses into Flat tables.
-    2.  **Aggregation:** Pivots Raw Nutrition Logs (40+ rows/day) into Daily Totals (Calories, Macros).
-    3.  **Tagging:** Wraps data in XML-style `<data name="x">` tags for robust LLM parsing.
-    4.  **Format:** Output is Minified JSON inside the prompt to maximize token efficiency/speed (~1 minute thinking time).
+### 4. Vitals (`biostack_vitals.py`)
+*   **Model:** Reads Google Sheets logs for "Human-Input" metrics (Blood Pressure, Weight, SMM, Body Fat %).
+*   **Auth:** Requires `credentials.json` (Service/App auth) and local-server flow on the first run.
 
-### 5. Delivery (`biostack_drive.py`)
-*   **Destination:** Google Drive API.
-*   **Naming:** Dynamic date-stamped filename: `BioStack_Brief_YYYY-MM-DD_to_YYYY-MM-DD.txt`.
-*   **Logic:** Checks for duplicates before upload. Uses distinct `drive_token.json`.
+### 5. The Analyst (`biostack_analyst.py`)
+*   **The Pre-processor:** Not just an aggregator, but a data-shrinker. It minimizes token usage by flattening nested Whoop JSON and summing raw Nutrition logs into "Daily Aggregates."
+*   **Correlative Signal:** Maps `Nutrition Day N` -> `Recovery Day N+1` to assist the LLM in finding sleep/performance friction.
+*   **Dataset Wrapping:** Output is minified JSON wrapped in XML tags (`<data name="...">`) for robust parsing by LLMs.
 
-## Deployment Rules (If writing code)
-1.  **Relative Paths:** All scripts MUST use `os.getcwd()` or dynamic path detection in Bash. Do not hardcode `/home/user`.
-2.  **Environment Variables:** All Credentials MUST reside in `.env`.
-3.  **Headless-First:** Any browser interaction MUST include `headless=new` options commented/uncommented for Debug/Prod toggling.
-4.  **Date Handling:** All Dates sent to S3 should be Strings (ISO format) to avoid serialization errors.
+### 6. Delivery (`biostack_drive.py`)
+*   **Format:** Plain-text "BioStack Brief" (.txt) containing the LLM-optimized prompt context.
+*   **Log Logic:** Uses dynamic date-stamp filenames: `BioStack_Brief_YYYY-MM-DD_to_YYYY-MM-DD.txt`.
+
+## Deployment Rules for New Code
+1.  **Headless Support:** All Selenium initializations must check for `--headless` and `--no-sandbox` to prevent crashes in CI/CD or Server environments.
+2.  **Relative Paths:** No hardcoded paths. All tokens/secrets are referenced relative to the project root.
+3.  **Error Resilience:** All scrapers must use `try/finally` blocks to ensure `driver.quit()` is called, preventing orphaned Chrome processes (zombie browsers) from exhausting Server RAM.
+4.  **Date Handling:** All scrapers must adhere to the `datetime.now(timezone.utc)` standard for multi-source synchronization.
