@@ -11,146 +11,155 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 
 load_dotenv()
 
-# --- CONFIG ---
 BUCKET_NAME = os.getenv('BIOSTACK_BUCKET_NAME')
 HANDLES = [h.strip() for h in os.getenv('X_FOLLOW_LIST', '').split(',') if h.strip()]
 
-def get_args():
-    parser = argparse.ArgumentParser(description="BioStack Expert Social Gatherer")
-    parser.add_argument('--days', type=int, default=7)
-    parser.add_argument('--visible', action='store_true')
-    return parser.parse_args()
-
 def setup_driver(headless=True):
     chrome_options = Options()
+    
+    # 1. DISABLE IMAGES (Saves massive CPU/RAM)
+    # 1 = Allow, 2 = Block
+    prefs = {
+        "profile.managed_default_content_settings.images": 2,
+        "profile.default_content_setting_values.notifications": 2,
+        "profile.managed_default_content_settings.stylesheets": 2, # Risky, but fast
+    }
+    chrome_options.add_experimental_option("prefs", prefs)
+
     if headless:
         chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--window-size=1280,1024") 
-    
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
+        # Smaller window = fewer elements to track in memory
+        chrome_options.add_argument("--window-size=800,600") 
+
+    # Mask automation
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=chrome_options)
-    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     return driver
 
 def inject_cookies(driver):
     cookie_path = 'twitter_cookies.json'
-    if not os.path.exists(cookie_path):
-        raise Exception(f"❌ {cookie_path} missing! Export JSON cookies from Chrome first.")
+    if not os.path.exists(cookie_path): return False
     
     driver.get("https://x.com")
     time.sleep(2)
     with open(cookie_path, 'r') as f:
         cookies = json.load(f)
     for cookie in cookies:
-        clean_cookie = {'name': cookie['name'], 'value': cookie['value'], 'domain': cookie['domain'], 'path': '/', 'secure': True}
-        try: driver.add_cookie(clean_cookie)
+        c = {'name': cookie['name'], 'value': cookie['value'], 'domain': cookie['domain'], 'path': '/'}
+        try: driver.add_cookie(c)
         except: pass
     driver.get("https://x.com/home")
-    time.sleep(4)
-    return "login" not in driver.current_url
+    time.sleep(3)
+    return True
 
-def optimize_page_for_vm(driver):
-    """ JS Hack: Removes heavy UI elements to save CPU/RAM on small AWS VMs """
-    js = """
-    var sidebars = document.querySelectorAll('div[data-testid="sidebarColumn"], nav[role="navigation"], div[role="progressbar"]');
-    sidebars.forEach(el => el.remove());
-    var primaryColumn = document.querySelector('div[data-testid="primaryColumn"]');
-    if (primaryColumn) { primaryColumn.style.maxWidth = '100%'; primaryColumn.style.width = '100%'; }
+def wipe_page_logic(driver):
+    """ Deletes every UI element on X that isn't a Tweet Article """
+    eraser_js = """
+    const itemsToKill = [
+        'div[data-testid="sidebarColumn"]',
+        'nav[role="navigation"]',
+        'header[role="banner"]',
+        'div[data-testid="placementTracking"]',
+        'div[aria-label="Relevant people"]',
+        'div[aria-label="Who to follow"]'
+    ];
+    itemsToKill.forEach(sel => {
+        let el = document.querySelector(sel);
+        if(el) el.remove();
+    });
+    // Set content column to full width for easier finding
+    let main = document.querySelector('div[data-testid="primaryColumn"]');
+    if(main) { main.style.maxWidth = '100%'; main.style.width = '100%'; }
     """
-    try: driver.execute_script(js)
+    try: driver.execute_script(eraser_js)
     except: pass
 
 def scrape_handle(driver, handle, days):
     url = f"https://x.com/{handle}/with_replies"
-    print(f"📡 Profile Activity: @{handle} (Targeting {days} days)")
+    print(f"📡 High-Efficiency Scrape: @{handle}")
     driver.get(url)
-    time.sleep(6)
     
-    optimize_page_for_vm(driver)
+    # Wait for the timeline to actually appear
+    time.sleep(5)
+    wipe_page_logic(driver)
     
     unique_tweets = {}
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     
-    # We scroll until we hit a tweet older than the cutoff
-    # This ensures we get EVERYTHING but stop ASAP to save VM resources
-    max_scrolls = 25 
-    for i in range(max_scrolls):
+    # Since we blocked images, scrolling is MUCH smoother and faster
+    for scroll in range(20):
+        # We search specifically for content blocks
         articles = driver.find_elements(By.TAG_NAME, "article")
-        found_historical_boundary = False
+        stop_now = False
         
         for art in articles:
             try:
                 time_el = art.find_element(By.TAG_NAME, "time")
-                ts_str = time_el.get_attribute("datetime")
-                ts_dt = pd.to_datetime(ts_str).to_pydatetime()
+                dt_str = time_el.get_attribute("datetime")
+                dt_obj = pd.to_datetime(dt_str).to_pydatetime()
                 
-                # Dedupe
                 txt_el = art.find_element(By.CSS_SELECTOR, 'div[data-testid="tweetText"]')
-                content = txt_el.text
-                t_id = f"{ts_str}_{content[:20]}"
+                text = txt_el.text
+                
+                # Deduplication key
+                t_id = f"{dt_str}_{text[:20]}"
                 
                 if t_id not in unique_tweets:
-                    if ts_dt >= cutoff:
-                        unique_tweets[t_id] = {"timestamp": ts_str, "content": content.replace("\n", " ")}
+                    if dt_obj >= cutoff:
+                        unique_tweets[t_id] = {"ts": dt_str, "content": text.replace("\n", " ")}
                     elif "Pinned" not in art.text:
-                        # Found a regular tweet older than 7 days. We can stop scrolling.
-                        found_historical_boundary = True
+                        stop_now = True
             except: continue
 
-        if found_historical_boundary:
-            print(f"   ✓ Historical limit reached ({cutoff.date()})")
-            break
-            
-        # Perform incremental scroll
-        print(f"   ...scrolling (found {len(unique_tweets)})")
-        driver.execute_script("window.scrollBy(0, 1800);")
-        time.sleep(3) # Let VM network catch up
+        if stop_now: break
+        
+        # Incremental scroll - faster on VMs because images are missing
+        driver.execute_script("window.scrollBy(0, 1500);")
+        time.sleep(1.5) # Reduced from 3s to 1.5s
+        
+        # Periodic UI cleanup during long scrolls
+        if scroll % 5 == 0: wipe_page_logic(driver)
 
     return list(unique_tweets.values())
 
 def main():
-    args = get_args()
-    driver = setup_driver(headless=not args.visible)
+    args = argparse.ArgumentParser()
+    args.add_argument('--days', type=int, default=7)
+    args.add_argument('--visible', action='store_true')
+    opts = args.parse_args()
+
+    driver = setup_driver(headless=not opts.visible)
     
     try:
-        if not inject_cookies(driver):
-            print("❌ Injection FAILED.")
-            return
-
-        final_manifest = {}
-        for handle in HANDLES:
-            try:
-                data = scrape_handle(driver, handle, args.days)
-                final_manifest[handle] = data
-                print(f"   ✅ Total Activity for @{handle}: {len(data)} items")
-                time.sleep(5)
-            except Exception as e:
-                print(f"   ⚠️ Error scraping @{handle}: {e}")
-
-        # --- S3 SAVE ---
-        ts = datetime.now().strftime('%Y%m%d')
-        s3 = boto3.client('s3')
-        s3_key = f"social/social_intel_{ts}.json"
+        if not inject_cookies(driver): return
         
-        s3.put_object(
+        final_out = {}
+        for h in HANDLES:
+            try:
+                tweets = scrape_handle(driver, h, opts.days)
+                final_out[h] = tweets
+                print(f"   ✓ Captured {len(tweets)}")
+            except Exception as e:
+                print(f"   ⚠️ Error: {e}")
+
+        # S3 Archive
+        ts = datetime.now().strftime('%Y%m%d')
+        boto3.client('s3').put_object(
             Bucket=BUCKET_NAME,
-            Key=s3_key,
-            Body=json.dumps(final_manifest, indent=2),
-            ContentType='application/json'
+            Key=f"social/social_intel_{ts}.json",
+            Body=json.dumps(final_out, indent=2)
         )
-        print(f"\n🚀 ANALYSIS PREPARED: s3://{BUCKET_NAME}/{s3_key}")
+        print(f"🚀 FINISHED: Archiving to social/social_intel_{ts}.json")
 
     finally:
         driver.quit()
