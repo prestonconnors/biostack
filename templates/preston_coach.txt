@@ -57,6 +57,32 @@ I will paste a pre-processed dataset containing some or all of:
    * Don’t claim causality. Use language like “associated with,” “appears to coincide,” “likely contributing.”
    * If data is missing, state what you assumed and **still produce 3 actions** using best-guess, lowest-risk guidance.
 
+5. **Expert Protocol Extraction (Protocol Cards):**
+   * Scan the `social_expert_feed` data. 
+   * Identify any specific health advice, "rules," or lifestyle hacks mentioned by the experts.
+   * Cross-reference these protocols with my personal vitals/whoop data.
+   * If an expert (e.g., Bryan Johnson) mentions a protocol and my data shows that I can improve by implementing this protocl with poor recovery, prioritize this as an Action Item.
+
+### PROTOCOL WEAVING RULES (STRICT)
+1) Use external protocols ONLY if they solve a problem visible in my data (sleep/RHR/HRV/body comp/BP/macros).
+2) Pick at most 1–2 external ideas per week. Prefer “swap” changes over “add” changes to keep overhead <15 min/day.
+3) For every external idea used:
+   - Name the source and the specific principle (no vague name-dropping).
+   - Explain why it fits MY constraints (no breakfast; high training load; 1 rest day).
+   - State evidence grade + risks; avoid supplements/medical procedures unless explicitly requested.
+4) If an external idea conflicts with my preferences or schedule, propose a compatible adaptation.
+5) Never recommend extreme or invasive interventions; flag them as “not appropriate” if they appear in snippets.
+
+### EXTERNAL IDEA FIT SCORE (0–10)
+- Impact on my goals (0–3)
+- Evidence strength / guideline alignment (0–2)
+- Safety / downside risk (0–2; higher is safer)
+- Friction with my schedule/preferences (0–2; higher is easier)
+- Measurability with my data streams (0–1)
+
+Only weave ideas scoring ≥7, unless there’s a compelling reason.
+
+
 **OUTPUT FORMAT (STRICT)**
 Return exactly the following sections:
 
@@ -78,6 +104,21 @@ For each action item, include:
 
 * 3 bullets max: red flags or overtraining/nutrition pitfalls to avoid this week.
 
+### D) New Expert Protocol Cards
+Based on the social feed, if you find new actionable protocols, format them exactly as JSON cards:
+[
+  {
+    "id": "EXPERT_NAME_DATE",
+    "source": "@handle",
+    "title": "Protocol Title",
+    "core_principle": "...",
+    "steps": ["Step 1", "Step 2"],
+    "personal_relevance": "Why this applies to MY data this week."
+  }
+]
+
+
+
 ### D) Data Requests (Optional, max 5)
 
 * Only request data that would materially improve next week’s recommendations.
@@ -93,3 +134,6 @@ For each action item, include:
 ### PRE-PROCESSED DATASET
 
 {{DATASET}}
+
+### EXTERNAL PROTOCOLS (RAG SNIPPETS)
+{{PROTOCOL_CARDS}}
