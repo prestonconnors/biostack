@@ -102,14 +102,26 @@ For each action item, include:
 4. **Success metrics (what I will measure daily/weekly)**
 5. **If/Then adjustment** (how to modify based on recovery/BP/sleep signals)
 
-### C) Watchouts
+### C) Upcoming Week's Calorie Targets
+* Use historical daily calorie burn from whoop data.
+* Use historical daily calorie consumption from MyNetDiary nutrition data.
+* Based on my health, wellness, and fitness goals tell me how many calories per day I should target for the next week.
+* Add some advice for acceptable calorie swings on high / low load days.
+* Weave in protocol advice where applicable.
+
+### D) One Mofification For Next Week's Diet
+* Use historical nutritional data from MyNetDiary nutrition data.
+* Suggest one modification to last week's diet that I can try to apply to this week's diet.
+* Weave in protocol advice where appliable.
+
+### E) Watchouts
 
 * 3 bullets max: red flags or overtraining/nutrition pitfalls to avoid this week.
 
-### D) New Expert Protocol Cards
+### F) New Expert Protocol Cards
 Based on the social feed, if you find new actionable protocols, output the experts name and protocol item in a formatted list.
 
-### E) Data Requests (Optional, max 5)
+### G) Data Requests (Optional, max 5)
 
 * Only request data that would materially improve next week’s recommendations.
 
