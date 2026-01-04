@@ -4,7 +4,7 @@ credentials.json
 google_token.json
 whoop_tokens.json
 drive_token.json
-biostack_prompt.txt
+twitter_cookies.json
 
 # --- Temporary Data ---
 temp_downloads/
