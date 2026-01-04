@@ -65,6 +65,16 @@ I will paste a pre-processed dataset containing some or all of:
    * Cross-reference these protocols with my personal nutrition/vitals/whoop data.
    * If an expert mentions a protocol and my data shows that I can improve by implementing this protocl with poor recovery, prioritize this as an Action Item.
 
+6. Protocol Card Synthesis (Weekly Cards):
+   - Create 5–8 “Weekly Protocol Cards” total.
+   - Cards must be PERSONALIZED: each card must reference at least one signal from my data (WHOOP / nutrition / vitals / InBody) OR state “insufficient data—defaulting to low-risk baseline.”
+   - Include:
+     a) 3–5 "Core Cards" that are almost always relevant (Sleep, Meal Timing, Training Load, Nutrition Quality, Measurement).
+     b) 0–2 "Expert Cards" pulled from social_expert_feed (only if Fit Score ≥ 7).
+     c) 0–1 "Wildcard Card" if a strong pattern appears (e.g., BP/sodium, alcohol, late eating, stress).
+   - Each card must have weekly checkboxes and a single “North Star” metric tied to my goal(s).
+   - Then select the 3 Action Items by choosing the 3 highest ROI cards this week (impact × evidence × ease), and convert them into the detailed Action Items format.
+
 ### PROTOCOL WEAVING RULES (STRICT)
 1) Use external protocols ONLY if they solve a problem visible in my data (sleep/RHR/HRV/body comp/BP/macros).
 2) Pick at most 1–2 external ideas per week. Prefer “swap” changes over “add” changes to keep overhead <15 min/day.
@@ -118,10 +128,33 @@ For each action item, include:
 
 * 3 bullets max: red flags or overtraining/nutrition pitfalls to avoid this week.
 
-### F) New Expert Protocol Cards
-Based on the social feed, if you find new actionable protocols, output the experts name and protocol item in a formatted list.
+### F) Weekly Protocol Cards (Personalized)
+Generate 5–8 cards. Use EXACTLY this format for each card:
 
-### G) Data Requests (Optional, max 5)
+**Card #: <Name>**
+- **North Star (1 metric):** <metric + target + timeframe>
+- **Why it’s on my board this week:** <1–2 lines tied to my data OR “baseline best-practice” if missing>
+- **Weekly targets (checkboxes):**
+  - ☐ ...
+  - ☐ ...
+  - ☐ ...
+- **How I’ll track:** <WHOOP / MyNetDiary / BP log / InBody / manual note>
+- **Friction rating (1–5):** <1 easy – 5 hard>
+- **If/Then:** <1 rule using WHOOP recovery/BP/sleep to adjust>
+
+Card rules:
+- Keep overhead ≤15 min/day total across ALL cards.
+- Avoid supplements/medical procedures unless explicitly requested.
+- No animals. (ignore if irrelevant)
+- If a card is derived from an expert: include “Source: <expert>” and the “External Idea Fit Score breakdown.”
+
+### G) New Expert Protocols Detected (Changelog)
+List only NEW expert-derived protocols found in social_expert_feed this run.
+
+Format:
+- Expert: <name> | Protocol: <one-liner> | Fit Score: <0–10> | Reason kept/dropped: <one line>
+
+### H) Data Requests (Optional, max 5)
 
 * Only request data that would materially improve next week’s recommendations.
 
