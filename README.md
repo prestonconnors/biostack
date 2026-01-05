@@ -1,4 +1,6 @@
-Here is the updated `README.md` reflecting the new template system and CLI arguments.
+Here is the updated `README.md`.
+
+I have updated the file to highlight the new **multi-year merging capability** in the file structure and architecture description, clarifying that the nutrition scraper now seamlessly handles date ranges that span across year boundaries (e.g., Dec 31 to Jan 1).
 
 ```markdown
 # BioStack 🧬
@@ -8,17 +10,18 @@ Here is the updated `README.md` reflecting the new template system and CLI argum
 ## 🚀 The Architecture
 
 1.  **Gatherers**: Independent Python scripts fetch raw data from APIs (Whoop, Sheets) and high-performance Selenium Scrapers.
-2.  **Expert Intel**: Specifically scans high-signal X (Twitter) feeds (Huberman, Attia, Johnson) for new health protocols using **Cookie Injection** and **Virtual Scrolling**.
-3.  **Storage**: Raw JSON data is stored in **AWS S3** (Private Data Lake).
-4.  **The Analyst**: Logic engine pulls S3 data, flattens datasets, aggregates nutrition, and correlates expert protocols against your biometrics (e.g., Does this new Huberman protocol explain my RHR spike?).
-5.  **Delivery**: A token-optimized "BioStack Brief" is uploaded to **Google Drive**, ready for insert into your favorite LLM.
+2.  **Smart Nutrition**: The MyNetDiary scraper allows **Cross-Year Fetching**—it automatically detects date ranges spanning year boundaries (e.g., Dec '25 to Jan '26), downloads multiple export files in a single session, and merges them into a unified dataset.
+3.  **Expert Intel**: Specifically scans high-signal X (Twitter) feeds (Huberman, Attia, Johnson) for new health protocols using **Cookie Injection** and **Virtual Scrolling**.
+4.  **Storage**: Raw JSON data is stored in **AWS S3** (Private Data Lake).
+5.  **The Analyst**: Logic engine pulls S3 data, flattens datasets, aggregates nutrition, and correlates expert protocols against your biometrics (e.g., Does this new Huberman protocol explain my RHR spike?).
+6.  **Delivery**: A token-optimized "BioStack Brief" is uploaded to **Google Drive**, ready for insert into your favorite LLM.
 
 ## 📂 Repository Structure
 
 ```text
 ├── biostack_whoop.py      # OAuth2 Fetcher for Whoop V2 API
 ├── biostack_social.py     # Selenium Scraper: Expert Twitter activity via Cookie Injection
-├── biostack_nutrition.py  # Selenium Scraper: MyNetDiary logs via Headless Chrome
+├── biostack_nutrition.py  # Selenium Scraper: MyNetDiary (Multi-year merge support)
 ├── biostack_vitals.py     # API Reader for Manual Google Sheet Logs (BP/Weight)
 ├── biostack_analyst.py    # The Brain: S3 Data -> XML/JSON Minified Prompt
 ├── biostack_drive.py      # The Courier: Uploads result to Google Drive
@@ -72,7 +75,7 @@ Switch the analysis logic to a specific user profile (e.g., specific medical his
 ```
 
 ### Deep Dive / Date Range
-Fetch more data for a monthly review:
+Fetch more data for a monthly review. The scrapers automatically handle Year-End boundaries:
 ```bash
 ./run_all.sh --days 30
 ```

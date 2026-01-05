@@ -105,8 +105,18 @@ def safe_send_keys_with_wait(driver, possible_selectors, text):
             continue
     return False
 
-def download_mynetdiary_csv(target_year):
+def get_downloaded_files():
+    """Returns list of valid completed download files in the temp dir."""
+    files = glob.glob(os.path.join(DOWNLOAD_DIR, "*.*"))
+    return [f for f in files if not f.endswith('.crdownload') and ('csv' in f.lower() or 'xls' in f.lower())]
+
+def download_mynetdiary_years(target_years):
+    """
+    Downloads export files for multiple years in a SINGLE Selenium session.
+    """
     driver = setup_driver()
+    downloaded_paths = []
+    
     try:
         # 1. Login
         login_url = "https://www.mynetdiary.com/logonPage.do"
@@ -127,38 +137,64 @@ def download_mynetdiary_csv(target_year):
 
         time.sleep(5) 
 
-        # 2. Trigger Download for specific year
-        export_url = f"https://www.mynetdiary.com/exportData.do?year={target_year}"
-        print(f"🚀 Triggering URL for Year {target_year}: {export_url}")
-        driver.get(export_url)
+        # 2. Iterate through requested years
+        for i, year in enumerate(target_years):
+            expected_file_count = i + 1
+            export_url = f"https://www.mynetdiary.com/exportData.do?year={year}"
+            print(f"🚀 Triggering URL for Year {year}: {export_url}")
+            driver.get(export_url)
 
-        # 3. Wait for file
-        print("⏳ Waiting for download...")
-        start_time = time.time()
-        while time.time() - start_time < 60: 
-            files = glob.glob(os.path.join(DOWNLOAD_DIR, "*.*"))
-            valid_files = [f for f in files if not f.endswith('.crdownload') and ('csv' in f.lower() or 'xls' in f.lower())]
+            # 3. Wait for download to increment file count
+            print(f"⏳ Waiting for Year {year} download...")
+            start_time = time.time()
+            success = False
             
-            if valid_files:
-                return valid_files[0]
-            time.sleep(1)
+            while time.time() - start_time < 60: 
+                valid_files = get_downloaded_files()
+                if len(valid_files) >= expected_file_count:
+                    success = True
+                    break
+                time.sleep(1)
+            
+            if not success:
+                print(f"⚠️ Warning: Timeout waiting for year {year}. It might not have data.")
         
-        raise Exception("Download timed out.")
+        downloaded_paths = get_downloaded_files()
+        if not downloaded_paths:
+            raise Exception("No files were successfully downloaded.")
+            
+        return downloaded_paths
 
     finally:
         driver.quit()
 
-def process_and_upload(csv_path, start_date, end_date):
-    print(f"⚙️  Processing... Filtering for {start_date.date()} to {end_date.date()}")
-    try:
-        # Load Data
+def process_and_upload(csv_paths, start_date, end_date):
+    print(f"⚙️  Processing {len(csv_paths)} file(s)... Filtering for {start_date.date()} to {end_date.date()}")
+    
+    all_dfs = []
+    
+    # 1. Load ALL files
+    for csv_path in csv_paths:
         try:
-            df = pd.read_excel(csv_path)
-        except:
             try:
-                df = pd.read_csv(csv_path, sep='\t')
+                temp_df = pd.read_excel(csv_path)
             except:
-                df = pd.read_csv(csv_path)
+                try:
+                    temp_df = pd.read_csv(csv_path, sep='\t')
+                except:
+                    temp_df = pd.read_csv(csv_path)
+            
+            all_dfs.append(temp_df)
+        except Exception as e:
+            print(f"❌ Error reading file {csv_path}: {e}")
+    
+    if not all_dfs:
+        print("❌ No dataframes could be loaded.")
+        return
+
+    try:
+        # 2. Merge into one Master DataFrame
+        df = pd.concat(all_dfs, ignore_index=True)
 
         # ⚠️ CRITICAL: Filter Data by Date
         # Ensure we find the date column. Usually 'Date'.
@@ -172,17 +208,21 @@ def process_and_upload(csv_path, start_date, end_date):
             # Convert column to datetime objects
             df[date_col] = pd.to_datetime(df[date_col], dayfirst=False, errors='coerce')
             
-            # Filter rows
+            # Filter rows across all combined years
             mask = (df[date_col] >= start_date) & (df[date_col] <= end_date)
             df = df.loc[mask]
         else:
-            print("⚠️ WARNING: Could not auto-detect a Date column. Uploading FULL file instead.")
+            print("⚠️ WARNING: Could not auto-detect a Date column. Uploading merged unfiltered file.")
 
         if df.empty:
-            print("⚠️ No data found in that date range.")
+            print("⚠️ No data matches that specific date range after filtering.")
             return
 
         # Prepare for Upload
+        # Sort just in case merging messed up order
+        if date_col:
+            df = df.sort_values(by=date_col)
+            
         data = df.fillna("").to_dict(orient='records')
         
         s3 = get_s3_client()
@@ -190,7 +230,7 @@ def process_and_upload(csv_path, start_date, end_date):
         timestamp_end = end_date.strftime('%Y%m%d')
         key = f"nutrition/nutrition_{timestamp_start}_to_{timestamp_end}.json"
         
-        print(f"🚀 Uploading {len(data)} records to S3...")
+        print(f"🚀 Uploading {len(data)} merged records to S3...")
         s3.put_object(
             Bucket=BUCKET_NAME,
             Key=key,
@@ -202,19 +242,21 @@ def process_and_upload(csv_path, start_date, end_date):
     except Exception as e:
         print(f"❌ Processing Error: {e}")
     finally:
-        if os.path.exists(csv_path):
-            os.remove(csv_path)
+        # cleanup
+        for f in csv_paths:
+            if os.path.exists(f):
+                os.remove(f)
 
 if __name__ == "__main__":
     args = get_args()
     start_date, end_date = calculate_date_range(args)
     
-    # Determine which year file to grab based on start date
-    # (Limitations: MyNetDiary separates by year. If request spans 2024-2025, 
-    # this script currently only grabs the year of the Start Date. 
-    # For a cross-year request, run the script twice.)
-    target_year = start_date.year
+    # Identify unique years involved (e.g., 2025 and 2026)
+    target_years = sorted(list(set(range(start_date.year, end_date.year + 1))))
     
-    file_path = download_mynetdiary_csv(target_year)
-    if file_path:
-        process_and_upload(file_path, start_date, end_date)
+    print(f"📅 Requested Range: {start_date.date()} -> {end_date.date()}")
+    print(f"📂 Required Years: {target_years}")
+
+    file_paths = download_mynetdiary_years(target_years)
+    if file_paths:
+        process_and_upload(file_paths, start_date, end_date)
