@@ -1,64 +1,72 @@
 #!/bin/bash
 
-# 1. PREP: Set Directory to Script Location (Robust for Cron)
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-cd "$SCRIPT_DIR"
+# ------------------------------------------------------------------
+# BioStack Master Orchestrator 🧬
+# 
+# Usage: 
+#   ./run_all.sh                        # Uses default template & 7 days
+#   ./run_all.sh --template custom.txt  # Uses specific prompt template
+#   ./run_all.sh --days 14              # Fetches 2 weeks of data
+# ------------------------------------------------------------------
 
-# 2. ACTIVATE PYTHON VENV
-# Tries standard location name 'venv'
-if [ -d "venv" ]; then
-    source venv/bin/activate
-elif [ -d ".venv" ]; then
-    source .venv/bin/activate
-else
-    echo "⚠️  Warning: Virtual Environment 'venv' not found. Trying global python..."
-fi
+# 1. Set Defaults
+TEMPLATE="templates/default_coach.txt"
+DAYS=7
 
-# 3. ARGUMENT PARSING (Default: 8 days for full weekly overlap)
-DAYS=8
-
+# 2. Parse Arguments
 while [[ "$#" -gt 0 ]]; do
     case $1 in
-        --days) DAYS="$2"; shift ;;
-        *) echo "Unknown parameter passed: $1"; exit 1 ;;
+        -t|--template) TEMPLATE="$2"; shift ;;
+        -d|--days) DAYS="$2"; shift ;;
+        *) echo "❌ Unknown parameter passed: $1"; exit 1 ;;
     esac
     shift
 done
 
+# 3. Verify Template Exists
+if [ ! -f "$TEMPLATE" ]; then
+    echo "❌ Error: Template file not found at '$TEMPLATE'"
+    echo "   Please check the path or create the file."
+    exit 1
+fi
+
 echo "=========================================="
-echo "🧬 BIOSTACK: Starting Sync for past $DAYS days"
-echo "   Date: $(date)"
-echo "   Path: $(pwd)"
+echo "🧬 BioStack Pipeline Initiated"
+echo "📅 Time Window: Last $DAYS days"
+echo "📄 Prompt Template: $TEMPLATE"
 echo "=========================================="
 
-# 4. EXECUTE GATHERERS (Continue even if one fails)
+# 4. Activate Virtual Env (Optional - Uncomment if using venv)
+# source venv/bin/activate
+
+# 5. Execute Gatherers (Sequential execution to save RAM on small AWS instances)
 echo ""
-echo "--- 1. FETCHING WHOOP DATA ---"
-python biostack_whoop.py --days "$DAYS"
+echo "1️⃣  [Gather] Whoop Wearable Data..."
+python biostack_whoop.py --days $DAYS
 
 echo ""
-echo "--- 2. FETCHING MYNETDIARY ---"
-# Note: Selenium can be flaky; ensure display args or headless mode are set in py script
-python biostack_nutrition.py --days "$DAYS"
+echo "2️⃣  [Gather] Social Expert Intel..."
+python biostack_social.py --days $DAYS
 
 echo ""
-echo "--- 3. FETCHING GOOGLE SHEETS ---"
-python biostack_vitals.py --days "$DAYS"
+echo "3️⃣  [Gather] Nutrition Logs (MyNetDiary)..."
+python biostack_nutrition.py --days $DAYS
 
 echo ""
-echo "--- 3. FETCHING SOCIAL POSTS ---"
-python biostack_social.py --days 7
+echo "4️⃣  [Gather] Vitals (Google Sheets)..."
+python biostack_vitals.py --days $DAYS
 
-# 5. EXECUTE ANALYSIS (The Brain)
+# 6. Execute Analyst (The Transformation Layer)
 echo ""
-echo "--- 4. ANALYZING DATA & PREPPING PROMPT ---"
-# You can also pass a template here if you want to hardcode one, e.g. --template templates/coach.txt
-python biostack_analyst.py --days "$DAYS"
+echo "5️⃣  [Analyst] Generating Contextual Prompt..."
+# Passing the template argument to the python script
+python biostack_analyst.py --days $DAYS --template "$TEMPLATE"
 
-# 6. DELIVERY
+# 7. Delivery
 echo ""
-echo "--- 5. UPLOADING TO DRIVE ---"
-python biostack_drive.py --days "$DAYS"
+echo "6️⃣  [Drive] Uploading Brief to Cloud..."
+python biostack_drive.py --days $DAYS
 
 echo ""
-echo "✅ DONE. Pipeline Finished."
+echo "🚀 BioStack Run Complete."
+echo "=========================================="
