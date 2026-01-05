@@ -1,7 +1,12 @@
+Here is the updated `AGENTS.md` file.
+
+I have updated the **The Analyst** section to reflect the new Persona/Template architecture and added a note about argument handling in the **Automation** section.
+
+```markdown
 # 🤖 Agent Context: BioStack
 
 ## Mission
-To maintain a high-integrity Personal Health Data Lake (PHDL) that correlates objective physiological data with external expert protocols. This system transforms raw S3 data into high-density, XML-wrapped JSON payloads for LLM-driven wellness analysis.
+To maintain a high-integrity Personal Health Data Lake (PHDL) that correlates objective physiological data with external expert protocols. This system transforms raw S3 data into high-density, XML-wrapped JSON payloads for LLM-driven wellness analysis, utilizing configurable "Coach Personas" to tailor advice.
 
 ## Core Architecture Stack
 *   **Storage Strategy:** Private "JSON-Lake" on S3, organized by provider and timestamp.
@@ -28,6 +33,7 @@ To maintain a high-integrity Personal Health Data Lake (PHDL) that correlates ob
 *   **Vitals:** Ingests manual blood pressure and body composition logs from Google Sheets API.
 
 ### 4. The Analyst (`biostack_analyst.py`)
+*   **Persona-Driven Logic:** Dynamically loads prompt templates (e.g., `preston_coach.txt` vs `default_coach.txt`) via CLI arguments (`--template`). This isolates medical history and goals from the code, allowing multiple users or changing strategies without refactoring.
 *   **Data Minimization:** Sums nutritional events into daily macro-summaries to save LLM context window space.
 *   **Protocol Contextualization:** Presents Expert Intel from the `social/` bucket alongside Biometric failings, allowing the LLM to verify protocol-fit (e.g., *Is this Bryan Johnson protocol actually addressing a spike in my RHR?*).
 
@@ -36,3 +42,5 @@ To maintain a high-integrity Personal Health Data Lake (PHDL) that correlates ob
 2.  **Stateless Injection:** Relies on local `twitter_cookies.json` being synced to the server root for auth-free landing.
 3.  **Debug Integrity:** Supports `--debug` for real-time streaming of captured content to the console, allowing monitor-less debugging of AWS scrapers.
 4.  **Date Awareness:** Uses strict UTC-anchored time comparison to deduplicate entries during "Virtual Scroll" captures.
+5.  **Template Safety:** The Analyst checks for the `{{DATASET}}` token in custom templates and defaults to a fallback prompt if the template file is missing or malformed to ensure pipeline continuity.
+```

@@ -1,3 +1,6 @@
+Here is the updated `README.md` reflecting the new template system and CLI arguments.
+
+```markdown
 # BioStack 🧬
 
 **BioStack** is an automated ETL (Extract, Transform, Load) pipeline for personal health data. It aggregates metrics from disconnected "walled gardens" (Whoop, MyNetDiary, Expert Social Intel), normalizes the data into a private AWS S3 Data Lake, and pre-processes it for high-speed analysis by Large Language Models (LLMs).
@@ -19,7 +22,10 @@
 ├── biostack_vitals.py     # API Reader for Manual Google Sheet Logs (BP/Weight)
 ├── biostack_analyst.py    # The Brain: S3 Data -> XML/JSON Minified Prompt
 ├── biostack_drive.py      # The Courier: Uploads result to Google Drive
-├── run_all.sh             # Master orchestrator script
+├── run_all.sh             # Master orchestrator script (CLI arguments supported)
+├── templates/             # Folder containing Analyst Prompt Templates
+│   ├── default_coach.txt  # Standard evidence-based health prompt
+│   └── preston_coach.txt  # Customized persona with specific health history
 ├── twitter_cookies.json   # Exported Session Cookies (User-supplied)
 └── .env                   # Keys (AWS, Google, MyNetDiary, X handles)
 ```
@@ -49,6 +55,28 @@
     ```
 2.  **Sync secrets:** Securely copy (SCP) your `.env`, `twitter_cookies.json`, and any generated `*_token.json` files to the server.
 
+## 🖥 Usage & Customization
+
+The pipeline is controlled via `run_all.sh`. You can run it with default settings or customize the timeframe and the "Coach Persona" used for analysis.
+
+### Standard Run
+Fetches the last 7 days of data and uses the `default_coach.txt` template:
+```bash
+./run_all.sh
+```
+
+### Custom Template (Persona)
+Switch the analysis logic to a specific user profile (e.g., specific medical history or goals) by pointing to a different text file in `templates/`:
+```bash
+./run_all.sh --template templates/preston_coach.txt
+```
+
+### Deep Dive / Date Range
+Fetch more data for a monthly review:
+```bash
+./run_all.sh --days 30
+```
+
 ## 🤖 Resource Management (Small VMs)
 `biostack_social.py` is purpose-built for low-RAM AWS instances (t2.micro/t3.small):
 *   **Image Blocking**: Refuses to download images/video to save ~80% CPU/Bandwidth.
@@ -58,7 +86,7 @@
 ## 📊 Automation (Cron)
 Run the full suite every Monday morning for a weekly trend brief:
 ```bash
-0 5 * * 1 /home/ubuntu/biostack/run_all.sh >> /home/ubuntu/biostack/run.log 2>&1
+0 5 * * 1 /home/ubuntu/biostack/run_all.sh --template templates/preston_coach.txt >> /home/ubuntu/biostack/run.log 2>&1
 ```
 
 ## 🔒 Security Note
@@ -66,3 +94,4 @@ The `twitter_cookies.json` file contains your active session. Keep this file pri
 
 ## 📄 License
 Personal Use. Developed for BioHackers.
+```
