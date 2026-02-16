@@ -14,8 +14,6 @@ load_dotenv()
 BUCKET_NAME = os.getenv('BIOSTACK_BUCKET_NAME')
 HANDLES = [h.strip() for h in os.getenv('X_FOLLOW_LIST', '').split(',') if h.strip()]
 
-# Twikit requires credentials if cookies expire. 
-# Add these to your .env file for robustness.
 TWITTER_USER = os.getenv('TWITTER_USERNAME')
 TWITTER_EMAIL = os.getenv('TWITTER_EMAIL') 
 TWITTER_PASS = os.getenv('TWITTER_PASSWORD')
@@ -27,12 +25,36 @@ def get_args():
     parser.add_argument('--debug', action='store_true')
     return parser.parse_args()
 
+def convert_cookies_to_dict(file_path):
+    """
+    Converts 'EditThisCookie' (List of Dicts) format to Twikit (Simple Dict) format.
+    """
+    try:
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+            
+        # Case 1: EditThisCookie Format (List)
+        if isinstance(data, list):
+            cookie_dict = {}
+            for cookie in data:
+                if 'name' in cookie and 'value' in cookie:
+                    cookie_dict[cookie['name']] = cookie['value']
+            return cookie_dict
+            
+        # Case 2: Already a Dict (Native Twikit)
+        elif isinstance(data, dict):
+            return data
+            
+    except Exception as e:
+        print(f"   ⚠️ Error parsing cookies: {e}")
+    return None
+
 async def get_user_tweets(client, handle, days, debug=False):
     """
     Scrapes tweets for a specific handle using Twikit.
     """
     try:
-        # 1. Get User ID from Handle
+        # 1. Get User ID
         user = await client.get_user_by_screen_name(handle)
         if debug:
             print(f"   found user id: {user.id}")
@@ -40,31 +62,29 @@ async def get_user_tweets(client, handle, days, debug=False):
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         collected_tweets = []
         
-        # 2. Fetch Tweets (Batching handled by library)
-        # We fetch slightly more to ensure we cover the date range
-        tweets = await user.get_tweets('Tweets', count=40)
+        # 2. Fetch Tweets
+        try:
+            tweets = await user.get_tweets('Tweets', count=40)
+        except Exception as e:
+            print(f"   ⚠️ Could not fetch timeline (might be private/suspended): {e}")
+            return []
         
         stop_scan = False
         
-        while not stop_scan:
-            if not tweets:
-                break
-
+        while not stop_scan and tweets:
             for tweet in tweets:
-                # Convert tweet time to UTC datetime
-                # Twikit returns string usually, dependent on version. 
-                # Assuming standard format or checking object properties.
                 try:
-                    # Twikit datetime is usually available directly or needs parsing
+                    # Parse timestamp (Twikit returns datetime object directly in recent versions)
+                    # We handle both string and datetime just in case
                     if hasattr(tweet, 'created_at_datetime'):
                          ts_obj = tweet.created_at_datetime
                     else:
+                         # Fallback for older versions/string responses
                          ts_obj = datetime.strptime(tweet.created_at, "%a %b %d %H:%M:%S %z %Y")
                     
                     if ts_obj < cutoff:
-                        # If we hit a tweet older than cutoff and it's not pinned, stop.
-                        # (Pinned logic is tricky in API, but usually safe to just check date)
-                        if ts_obj < cutoff - timedelta(days=1): # Buffer
+                        # Allow 24h buffer for pinned tweets before stopping
+                        if ts_obj < cutoff - timedelta(days=1): 
                              stop_scan = True
                         continue
 
@@ -87,7 +107,6 @@ async def get_user_tweets(client, handle, days, debug=False):
             if stop_scan:
                 break
                 
-            # Fetch next page
             try:
                 tweets = await tweets.next()
             except Exception:
@@ -111,20 +130,25 @@ async def main():
 
     # LOGIN LOGIC
     print("📡 Authenticating with X (Twikit)...")
-    try:
-        if os.path.exists(COOKIE_FILE):
-            client.load_cookies(COOKIE_FILE)
-            print(f"   ✅ Loaded session from {COOKIE_FILE}")
+    authenticated = False
+
+    # 1. Try Cookies
+    if os.path.exists(COOKIE_FILE):
+        cookies = convert_cookies_to_dict(COOKIE_FILE)
+        if cookies:
+            client.set_cookies(cookies)
+            print(f"   ✅ Loaded {len(cookies)} cookies from {COOKIE_FILE}")
+            authenticated = True
         
-        # Verify login or full login if cookies missing/invalid
-        # We attempt a call; if it fails, we login with password
+    # 2. Verify / Fallback to Password
+    try:
+        # Simple test call to verify session
+        # (This avoids a crash later if cookies are expired)
         try:
-            # Simple check to see if we are valid (get own user)
-            # Some versions allow client.user() check
-            pass 
-        except:
+            await client.user() 
+        except Exception:
             if TWITTER_USER and TWITTER_PASS:
-                print("   🔄 Cookies failed/missing, performing full login...")
+                print("   🔄 Session expired. Performing full login...")
                 await client.login(
                     auth_info_1=TWITTER_USER,
                     auth_info_2=TWITTER_EMAIL,
@@ -132,19 +156,21 @@ async def main():
                 )
                 client.save_cookies(COOKIE_FILE)
                 print("   ✅ Login success & cookies saved.")
+                authenticated = True
             else:
-                print("   ❌ No valid cookies and no credentials in .env")
-                return
+                print("   ❌ Session expired and no credentials in .env")
+                if not authenticated: return
 
     except Exception as e:
-        print(f"   ❌ Authentication Failed: {e}")
-        return
+        print(f"   ❌ Authentication Error: {e}")
+        # Proceed if we think we might still be good, otherwise return
+        if not authenticated: return
 
     # PROCESSING LOOP
     for handle in HANDLES:
         print(f"📡 Processing @{handle}...")
         
-        # Add a small random pause to behave like a human
+        # Human pause
         await asyncio.sleep(2) 
         
         intel = await get_user_tweets(client, handle, args.days, debug=args.debug)
