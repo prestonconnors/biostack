@@ -1,164 +1,173 @@
 import os
 import json
-import time
+import asyncio
 import boto3
 import argparse
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
+from twikit import Client, TooManyRequests
 
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.common.exceptions import WebDriverException
-from webdriver_manager.chrome import ChromeDriverManager
-
+# Load environment variables
 load_dotenv()
 
 BUCKET_NAME = os.getenv('BIOSTACK_BUCKET_NAME')
 HANDLES = [h.strip() for h in os.getenv('X_FOLLOW_LIST', '').split(',') if h.strip()]
 
+# Twikit requires credentials if cookies expire. 
+# Add these to your .env file for robustness.
+TWITTER_USER = os.getenv('TWITTER_USERNAME')
+TWITTER_EMAIL = os.getenv('TWITTER_EMAIL') 
+TWITTER_PASS = os.getenv('TWITTER_PASSWORD')
+COOKIE_FILE = 'twitter_cookies.json'
+
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--days', type=int, default=7)
-    parser.add_argument('--visible', action='store_true')
     parser.add_argument('--debug', action='store_true')
     return parser.parse_args()
 
-def setup_driver(headless=True):
-    chrome_options = Options()
-    
-    # PERFORMANCE & MEMORY (Hardened for AWS)
-    prefs = {"profile.managed_default_content_settings.images": 2}
-    chrome_options.add_experimental_option("prefs", prefs)
-
-    if headless:
-        chrome_options.add_argument("--headless=new")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage") # Use /tmp instead of memory
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--window-size=1280,720")
-        # Resource constraints
-        chrome_options.add_argument("--disable-extensions")
-        chrome_options.add_argument("--memory-pressure-off")
-    
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
-    
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-    return driver
-
-def inject_cookies(driver):
-    cookie_path = 'twitter_cookies.json'
-    if not os.path.exists(cookie_path): return False
-    
+async def get_user_tweets(client, handle, days, debug=False):
+    """
+    Scrapes tweets for a specific handle using Twikit.
+    """
     try:
-        driver.get("https://x.com")
-        time.sleep(3)
-        with open(cookie_path, 'r') as f:
-            cookies = json.load(f)
-        for cookie in cookies:
-            c = {'name': cookie['name'], 'value': cookie['value'], 'domain': cookie['domain'], 'path': '/'}
-            try: driver.add_cookie(c)
-            except: pass
-        driver.get("https://x.com/home")
-        time.sleep(4)
-        return "login" not in driver.current_url
-    except Exception as e:
-        print(f"Cookie injection error: {e}")
-        return False
+        # 1. Get User ID from Handle
+        user = await client.get_user_by_screen_name(handle)
+        if debug:
+            print(f"   found user id: {user.id}")
 
-def wipe_ui(driver):
-    js = "const s = ['div[data-testid=\"sidebarColumn\"]', 'nav[role=\"navigation\"]', 'header[role=\"banner\"]']; s.forEach(x => { let e = document.querySelector(x); if(e) e.remove(); });"
-    try: driver.execute_script(js)
-    except: pass
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        collected_tweets = []
+        
+        # 2. Fetch Tweets (Batching handled by library)
+        # We fetch slightly more to ensure we cover the date range
+        tweets = await user.get_tweets('Tweets', count=40)
+        
+        stop_scan = False
+        
+        while not stop_scan:
+            if not tweets:
+                break
 
-def scrape_handle(driver, handle, days, debug=False):
-    driver.get(f"https://x.com/{handle}/with_replies")
-    time.sleep(6)
-    wipe_ui(driver)
-    
-    unique_tweets = {}
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    
-    for scroll in range(20):
-        try:
-            articles = driver.find_elements(By.TAG_NAME, "article")
-            stop_scan = False
-            for art in articles:
+            for tweet in tweets:
+                # Convert tweet time to UTC datetime
+                # Twikit returns string usually, dependent on version. 
+                # Assuming standard format or checking object properties.
                 try:
-                    time_el = art.find_element(By.TAG_NAME, "time")
-                    ts = time_el.get_attribute("datetime")
-                    dt_obj = pd.to_datetime(ts).to_pydatetime()
+                    # Twikit datetime is usually available directly or needs parsing
+                    if hasattr(tweet, 'created_at_datetime'):
+                         ts_obj = tweet.created_at_datetime
+                    else:
+                         ts_obj = datetime.strptime(tweet.created_at, "%a %b %d %H:%M:%S %z %Y")
                     
-                    text_el = art.find_element(By.CSS_SELECTOR, 'div[data-testid="tweetText"]')
-                    content = text_el.text
-                    
-                    t_id = f"{ts}_{content[:20]}"
-                    if t_id not in unique_tweets:
-                        if dt_obj >= cutoff:
-                            unique_tweets[t_id] = {"ts": ts, "content": content.replace("\n", " ")}
-                            if debug: print(f"   [+] {dt_obj.strftime('%m-%d')} | {content[:60]}...")
-                        elif "Pinned" not in art.text:
-                            stop_scan = True
-                except: continue
-            
-            if stop_scan: break
-            driver.execute_script("window.scrollBy(0, 1500);")
-            time.sleep(2.5) # Increased for stability
-        except WebDriverException as we:
-            raise we # Re-throw to handle crash in the main loop
-            
-    return list(unique_tweets.values())
+                    if ts_obj < cutoff:
+                        # If we hit a tweet older than cutoff and it's not pinned, stop.
+                        # (Pinned logic is tricky in API, but usually safe to just check date)
+                        if ts_obj < cutoff - timedelta(days=1): # Buffer
+                             stop_scan = True
+                        continue
 
-def main():
+                    tweet_data = {
+                        "ts": ts_obj.isoformat(),
+                        "content": tweet.text.replace("\n", " "),
+                        "likes": tweet.favorite_count,
+                        "retweets": tweet.retweet_count,
+                        "url": f"https://x.com/{handle}/status/{tweet.id}"
+                    }
+                    
+                    collected_tweets.append(tweet_data)
+                    if debug:
+                        print(f"   [+] {ts_obj.strftime('%m-%d')} | {tweet.text[:40]}...")
+
+                except Exception as e:
+                    if debug: print(f"   Error parsing tweet: {e}")
+                    continue
+            
+            if stop_scan:
+                break
+                
+            # Fetch next page
+            try:
+                tweets = await tweets.next()
+            except Exception:
+                break
+                
+        return collected_tweets
+
+    except TooManyRequests as e:
+        print(f"   ⚠️ Rate Limited on @{handle}: {e}")
+        return []
+    except Exception as e:
+        print(f"   ❌ Error scraping @{handle}: {e}")
+        return []
+
+async def main():
     args = get_args()
     master_intel = {}
     
-    for handle in HANDLES:
-        success = False
-        retries = 0
-        
-        while not success and retries < 2:
-            print(f"📡 Processing @{handle} (Attempt {retries+1})...")
-            driver = None
-            try:
-                driver = setup_driver(headless=not args.visible)
-                if not inject_cookies(driver):
-                    print(f"   ❌ Cookie fail on @{handle}")
-                    break
-                
-                intel = scrape_handle(driver, handle, args.days, debug=args.debug)
-                master_intel[handle] = intel
-                print(f"   ✅ Done: {len(intel)} tweets.")
-                success = True
-                
-            except WebDriverException as e:
-                retries += 1
-                print(f"   ⚠️ TAB CRASHED or Driver Failed. Retrying...")
-                time.sleep(5)
-            except Exception as fatal:
-                print(f"   ❌ Unexpected Error on @{handle}: {fatal}")
-                break
-            finally:
-                if driver: 
-                    try: driver.quit()
-                    except: pass
-                # Forced pause to let OS reclaim RAM
-                time.sleep(2)
+    # Initialize Client
+    client = Client('en-US')
 
-    # UPLOAD
+    # LOGIN LOGIC
+    print("📡 Authenticating with X (Twikit)...")
+    try:
+        if os.path.exists(COOKIE_FILE):
+            client.load_cookies(COOKIE_FILE)
+            print(f"   ✅ Loaded session from {COOKIE_FILE}")
+        
+        # Verify login or full login if cookies missing/invalid
+        # We attempt a call; if it fails, we login with password
+        try:
+            # Simple check to see if we are valid (get own user)
+            # Some versions allow client.user() check
+            pass 
+        except:
+            if TWITTER_USER and TWITTER_PASS:
+                print("   🔄 Cookies failed/missing, performing full login...")
+                await client.login(
+                    auth_info_1=TWITTER_USER,
+                    auth_info_2=TWITTER_EMAIL,
+                    password=TWITTER_PASS
+                )
+                client.save_cookies(COOKIE_FILE)
+                print("   ✅ Login success & cookies saved.")
+            else:
+                print("   ❌ No valid cookies and no credentials in .env")
+                return
+
+    except Exception as e:
+        print(f"   ❌ Authentication Failed: {e}")
+        return
+
+    # PROCESSING LOOP
+    for handle in HANDLES:
+        print(f"📡 Processing @{handle}...")
+        
+        # Add a small random pause to behave like a human
+        await asyncio.sleep(2) 
+        
+        intel = await get_user_tweets(client, handle, args.days, debug=args.debug)
+        
+        if intel:
+            master_intel[handle] = intel
+            print(f"   ✅ Done: {len(intel)} tweets.")
+        else:
+            print(f"   ⚠️ No tweets found or access denied.")
+
+    # UPLOAD TO S3
     if master_intel:
-        key = f"social/social_intel_{datetime.now().strftime('%Y%m%d')}.json"
-        boto3.client('s3').put_object(
-            Bucket=BUCKET_NAME, Key=key, 
-            Body=json.dumps(master_intel, indent=2)
-        )
-        print(f"🚀 SUCCESS: s3://{BUCKET_NAME}/{key}")
+        try:
+            key = f"social/social_intel_{datetime.now().strftime('%Y%m%d')}.json"
+            s3 = boto3.client('s3')
+            s3.put_object(
+                Bucket=BUCKET_NAME, 
+                Key=key, 
+                Body=json.dumps(master_intel, indent=2)
+            )
+            print(f"🚀 SUCCESS: s3://{BUCKET_NAME}/{key}")
+        except Exception as e:
+            print(f"❌ S3 Upload Failed: {e}")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
