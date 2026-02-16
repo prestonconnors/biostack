@@ -12,6 +12,9 @@ google-auth-oauthlib
 # --- Web Automation & Data (Nutrition) ---
 selenium
 webdriver-manager
+twikit
+boto3
 pandas
-openpyxl
+python-dotenv
 xlrd
+openpyxl
