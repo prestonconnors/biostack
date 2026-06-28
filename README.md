@@ -1,149 +1,197 @@
 # BioStack 🧬
 
-**BioStack** is an automated ETL (Extract, Transform, Load) pipeline for personal health data. It aggregates metrics from disconnected "walled gardens" (Whoop, MyNetDiary, Expert Social Intel), normalizes the data into a private AWS S3 Data Lake, and pre-processes it for high-speed analysis by Large Language Models (LLMs).
+**BioStack** is an automated ETL pipeline for personal health data. It pulls data from disconnected health and behavior platforms, normalizes it into a private AWS S3 data lake, and prepares token-efficient summaries for analysis by LLMs.
 
-## 🚀 The Architecture
+## 🚀 Architecture
 
-1.  **Gatherers**: Independent Python scripts fetch raw data from APIs (Whoop, Sheets) and specialized collectors.
-2.  **Expert Intel**: Specifically scans high-signal X (Twitter) feeds (Huberman, Attia, Johnson). Now utilizes an **API-based library (`twikit`)** for 10x faster collection and significantly lower CPU/RAM usage compared to legacy browser scraping.
-3.  **Smart Nutrition**: The MyNetDiary scraper (Selenium-based) allows **Cross-Year Fetching**—it automatically detects date ranges spanning year boundaries (e.g., Dec '25 to Jan '26), downloads multiple export files in a single session, and merges them into a unified dataset.
-4.  **Storage**: Raw JSON data is stored in **AWS S3** (Private Data Lake).
-5.  **The Analyst**: Logic engine pulls S3 data, flattens datasets, aggregates nutrition, and correlates expert protocols against your biometrics (e.g., Does this new Huberman protocol explain my RHR spike?).
-6.  **Delivery**: A token-optimized "BioStack Brief" is uploaded to **Google Drive**, ready for insert into your favorite LLM.
+1. **Gatherers**: Independent Python scripts fetch raw data from Whoop, MyNetDiary, Google Sheets, and selected expert social feeds.
+2. **Expert Intel**: `biostack_social.py` scans high-signal X/Twitter activity using `twikit`, avoiding Chrome/Selenium browser scraping.
+3. **Smart Nutrition**: `biostack_nutrition.py` logs in to MyNetDiary with `requests`, downloads yearly exports directly, supports cross-year date ranges, merges the exports, filters by date, and uploads normalized JSON to S3.
+4. **Storage**: Raw and processed JSON data is stored in a private AWS S3 bucket.
+5. **Analyst**: `biostack_analyst.py` pulls S3 data, flattens datasets, aggregates nutrition, and correlates expert protocols against biometrics.
+6. **Delivery**: `biostack_drive.py` uploads a token-optimized BioStack Brief to Google Drive.
 
 ## 📂 Repository Structure
 
 ```text
-├── biostack_whoop.py      # OAuth2 Fetcher for Whoop V2 API
-├── biostack_social.py     # Twikit/API Fetcher: Expert Twitter activity (No Chrome required)
-├── biostack_nutrition.py  # Selenium Scraper: MyNetDiary (Multi-year merge support)
-├── biostack_vitals.py     # API Reader for Manual Google Sheet Logs (BP/Weight)
-├── biostack_analyst.py    # The Brain: S3 Data -> XML/JSON Minified Prompt
-├── biostack_drive.py      # The Courier: Uploads result to Google Drive
-├── run_all.sh             # Master orchestrator script (CLI arguments supported)
-├── templates/             # Folder containing Analyst Prompt Templates
-│   ├── default_coach.txt  # Standard evidence-based health prompt
-│   └── preston_coach.txt  # Customized persona with specific health history
-├── twitter_cookies.json   # Exported Session Cookies (User-supplied)
-└── .env                   # Keys (AWS, Google, MyNetDiary, X Credentials)
+├── biostack_whoop.py      # OAuth2 fetcher for Whoop API
+├── biostack_social.py     # Twikit/API fetcher for expert X/Twitter activity
+├── biostack_nutrition.py  # Requests-based MyNetDiary export fetcher
+├── biostack_vitals.py     # Google Sheets reader for manual BP/weight logs
+├── biostack_analyst.py    # S3 data -> token-optimized BioStack Brief
+├── biostack_drive.py      # Uploads generated brief to Google Drive
+├── run_all.sh             # Master orchestrator script
+├── templates/             # Analyst prompt templates
+│   ├── default_coach.txt
+│   └── preston_coach.txt
+├── twitter_cookies.json   # X/Twitter session cookies, user-supplied/private
+└── .env                   # Secrets and credentials, never commit
 ```
 
 ## 🛠 Prerequisites
 
-*   **Google Chrome**: Required **ONLY** for the Nutrition scraper (`biostack_nutrition.py`).
-*   **Python Libraries**: `pip install twikit boto3 pandas python-dotenv selenium webdriver-manager`.
-*   **AWS S3 Bucket**: Private bucket with IAM R/W access.
+- Python 3.10+ recommended.
+- AWS S3 bucket with read/write access.
+- Google OAuth credentials/tokens for Whoop/Drive/Sheets flows where applicable.
+- No Chrome, ChromeDriver, Selenium, or copied MyNetDiary browser cookie is required for the current nutrition flow.
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+If installing manually, the common dependencies are:
+
+```bash
+pip install requests twikit boto3 pandas python-dotenv xlrd openpyxl
+```
 
 ## ⚡ Installation & Setup
 
-### 1. Laptop Configuration (Initial Setup)
-1.  **Install dependencies:** `pip install -r requirements.txt`.
-2.  **Configure environment:** Duplicate `.env.example` to `.env`.
-    *   Add `TWITTER_USERNAME`, `TWITTER_EMAIL`, and `TWITTER_PASSWORD` to allow the social scraper to self-heal if cookies expire.
-3.  **Authentication:**
-    *   Run `python biostack_whoop.py` (Local login for OAuth).
-    *   Login to X on your regular browser, export cookies as **JSON** (using "EditThisCookie" extension), and save them as `twitter_cookies.json` in the project root.
-4.  **Verification:** Test the social scraper locally:
-    `python biostack_social.py --days 1 --debug`
+### 1. Configure environment
 
-### 2. Server Deployment (AWS EC2 / Linux)
-1.  **Install Chrome binary** (For Nutrition Scraper):
-    ```bash
-    wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-    sudo apt install ./google-chrome-stable_current_amd64.deb -y
-    ```
-2.  **Sync secrets:** Securely copy (SCP) your `.env`, `twitter_cookies.json`, and any generated `*_token.json` files to the server.
+Copy the example environment file, then fill in secrets:
 
-## 🖥 Usage & Customization
+```bash
+cp .env.example .env
+nano .env
+```
 
-The pipeline is controlled via `run_all.sh`. You can run it with default settings or customize the timeframe and the "Coach Persona" used for analysis.
+Recommended `.env` values:
 
-### Standard Run
-Fetches the last 7 days of data and uses the `default_coach.txt` template:
+```bash
+AWS_ACCESS_KEY_ID='...'
+AWS_SECRET_ACCESS_KEY='...'
+BIOSTACK_BUCKET_NAME='biostack-data-lake'
+
+MYNETDIARY_USER='your_mynetdiary_login'
+MYNETDIARY_PASS='your_mynetdiary_password'
+MYNETDIARY_REMEMBER_ME=true
+
+TWITTER_USERNAME='...'
+TWITTER_EMAIL='...'
+TWITTER_PASSWORD='...'
+```
+
+### 2. Authenticate services
+
+Whoop:
+
+```bash
+python biostack_whoop.py
+```
+
+X/Twitter social collector:
+
+1. Log in to X in your regular browser.
+2. Export cookies as JSON.
+3. Save them as `twitter_cookies.json` in the project root.
+4. Add X credentials to `.env` so the social scraper can self-heal if cookies expire.
+
+Test social collection:
+
+```bash
+python biostack_social.py --days 1 --debug
+```
+
+### 3. Test MyNetDiary nutrition export
+
+Run a small date range first:
+
+```bash
+python biostack_nutrition.py --start 2026-06-01 --end 2026-06-27
+```
+
+Expected flow:
+
+```text
+Opening MyNetDiary login page...
+Signing in to MyNetDiary...
+MyNetDiary login succeeded.
+Downloading MyNetDiary export for Year YYYY...
+Processing file(s)...
+SUCCESS: s3://...
+```
+
+## 🖥 Usage
+
+### Standard run
+
+Fetches the default recent window and uses the default coach template:
+
 ```bash
 ./run_all.sh
 ```
 
-### Custom Template (Persona)
-Switch the analysis logic to a specific user profile (e.g., specific medical history or goals) by pointing to a different text file in `templates/`:
+### Custom template
+
 ```bash
 ./run_all.sh --template templates/preston_coach.txt
 ```
 
-### Deep Dive / Date Range
-Fetch more data for a monthly review. The scrapers automatically handle Year-End boundaries:
+### Date range / deep dive
+
 ```bash
 ./run_all.sh --days 30
 ```
 
-## 🤖 Resource Management (Small VMs)
-The pipeline is optimized for **t2.micro (1GB RAM)** instances:
-*   **Social Intel**: Now uses direct API calls via `twikit` (very low memory footprint).
-*   **Nutrition**: Uses Selenium with image-blocking and atomic sessions to stay within memory limits.
-*   **Self-Healing**: Scripts include logic to retry on network failures or API rate limits.
+For nutrition directly:
 
-## 📊 Automation (Cron)
-Run the full suite every Monday morning for a weekly trend brief:
 ```bash
-0 5 * * 1 /home/ubuntu/biostack/run_all.sh --template templates/preston_coach.txt >> /home/ubuntu/biostack/run.log 2>&1
+python biostack_nutrition.py --days 7
+python biostack_nutrition.py --start 2026-06-01 --end 2026-06-27
 ```
 
-## 🔒 Security Note
-The `twitter_cookies.json` file contains your active session. Keep this file private. The included `.gitignore` is pre-configured to ignore all token and cookie files.
+The nutrition script automatically determines which years are needed, downloads one export per year, merges them, and filters the final dataset to the requested date range.
+
+## 🤖 Resource Management
+
+The pipeline is optimized for small AWS EC2 instances such as `t2.micro` or `t3.micro`.
+
+- **Social Intel:** Direct API-style calls through `twikit`, no Chrome.
+- **Nutrition:** Direct HTTP login/export through `requests`, no Chrome/Selenium.
+- **Storage:** Compact JSON uploads to S3.
+- **Failure Mode:** Scripts should fail clearly when credentials expire, login fails, exports are unavailable, or no rows match the requested date range.
+
+## 📊 Automation with cron
+
+Example weekly run every Monday at 5:00 AM:
+
+```cron
+0 5 * * 1 cd /home/ubuntu/biostack && /home/ubuntu/biostack/run_all.sh --template templates/preston_coach.txt >> /home/ubuntu/biostack/run.log 2>&1
+```
+
+Example daily nutrition refresh at 6:00 AM:
+
+```cron
+0 6 * * * cd /home/preston/biostack && /home/preston/biostack/venv/bin/python3 biostack_nutrition.py --days 7 >> /home/preston/biostack/logs/nutrition.log 2>&1
+```
+
+Create logs directory first:
+
+```bash
+mkdir -p /home/preston/biostack/logs
+```
+
+## 🔒 Security Notes
+
+Never commit secrets, tokens, cookies, exports, or temporary downloads.
+
+Recommended `.gitignore` entries:
+
+```gitignore
+.env
+twitter_cookies.json
+*_token.json
+temp_downloads/
+logs/
+*.xls
+*.xlsx
+```
+
+`twitter_cookies.json` contains an active X/Twitter session. MyNetDiary uses username/password login at runtime, so a copied MyNetDiary browser cookie is no longer needed.
 
 ## 📄 License
-Personal Use. Developed for BioHackers.
-```# BioStack 🧬
 
-## 🚀 The Architecture
-
-1.  **Gatherers**: Independent Python scripts fetch raw data from APIs (Whoop, Sheets) and specialized collectors.
-2.  **Expert Intel**: Specifically scans high-signal X (Twitter) feeds. Now utilizes an **API-based library (`twikit`)** for 10x faster collection and significantly lower CPU/RAM usage compared to previous browser-based versions.
-3.  **Smart Nutrition**: The MyNetDiary scraper (Selenium-based) allows **Cross-Year Fetching**...
-
-## 📂 Repository Structure
-
-```text
-├── biostack_social.py     # Lightweight API-based fetcher for X (No longer requires Chrome)
-├── biostack_nutrition.py  # Selenium Scraper: MyNetDiary (Requires Chrome)
-...
-├── twitter_cookies.json   # Exported Session Cookies
-└── .env                   # Keys (AWS, Google, MyNetDiary, X Credentials)
-🛠 Prerequisites
-
-Google Chrome: Required ONLY for the Nutrition scraper (biostack_nutrition.py).
-
-Python Libraries: pip install twikit boto3 pandas python-dotenv.
-
-X Credentials: For the Social scraper, add TWITTER_USERNAME, TWITTER_EMAIL, and TWITTER_PASSWORD to your .env to allow the script to self-heal if cookies expire.
-
-⚡ Installation & Setup
-1. Authentication
-
-Social Scraper:
-
-Login to X on your regular browser.
-
-Use an extension (e.g., EditThisCookie) to export cookies as JSON.
-
-Save as twitter_cookies.json in the root folder.
-
-Optional but Recommended: Add your X password to .env so the script can re-authenticate automatically if the server is logged out.
-
-🤖 Resource Management
-
-The pipeline is optimized for t2.micro (1GB RAM) instances:
-
-Social: Now uses direct API calls (very low memory).
-
-Nutrition: Uses Selenium with image-blocking and atomic sessions to stay within memory limits.
-
-code
-Code
-download
-content_copy
-expand_less
-### Key Changes Made:
-1.  **Dependency Shift**: Noted that Chrome is no longer required for `biostack_social.py`.
-2.  **Auth Update**: Added mention of `TWITTER_PASSWORD` in `.env` as a fallback mechanism.
-3.  **Performance**: Highlighted the move from "Browser Scraping" to "Internal API" which is a major stability upgrade for small AWS instances.
+Personal use. Developed for BioHackers.

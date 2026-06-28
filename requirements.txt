@@ -10,8 +10,6 @@ google-auth-httplib2
 google-auth-oauthlib
 
 # --- Web Automation & Data (Nutrition) ---
-selenium
-webdriver-manager
 twikit
 boto3
 pandas
