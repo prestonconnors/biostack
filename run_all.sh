@@ -10,7 +10,7 @@
 # ------------------------------------------------------------------
 
 # 1. Set Defaults
-TEMPLATE="templates/default_coach.txt"
+TEMPLATE="/home/preston/biostack/templates/default_coach.txt"
 DAYS=7
 
 # 2. Parse Arguments
@@ -37,7 +37,7 @@ echo "📄 Prompt Template: $TEMPLATE"
 echo "=========================================="
 
 # 4. Activate Virtual Env (Optional - Uncomment if using venv)
-# source venv/bin/activate
+source venv/bin/activate
 
 # 5. Execute Gatherers (Sequential execution to save RAM on small AWS instances)
 echo ""

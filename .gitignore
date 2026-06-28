@@ -14,4 +14,4 @@ __pycache__/
 # --- Virtual Environment (Don't upload library files) ---
 venv/
 .venv/
-biostack_env/
+biostack_env/social_cache.json
