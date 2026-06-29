@@ -1,99 +1,113 @@
 # 🤖 Agent Context: BioStack
 
 ## Mission
-
-Maintain a high-integrity Personal Health Data Lake (PHDL) that correlates objective physiological data, manually logged vitals, nutrition exports, and external expert protocols.
+Maintain a high-integrity Personal Health Data Lake (PHDL) that correlates objective physiological data with external expert protocols and user biometrics.
 
 ## Core Architecture Stack
 
-### Scraping / Collection Strategy
+### Data Collection Strategy
+* **Whoop:** OAuth2/API fetcher for recovery, strain, sleep, HR, and related physiological metrics.
+* **Nutrition:** Selenium-driven MyNetDiary collection for the walled-garden nutrition export flow. Optimized for low-RAM AWS instances.
+* **Vitals:** API-based reader for manually logged vitals in Google Sheets.
+* **Social Expert Intel:** Official **X API v2** collector using Bearer Token auth and Recent Search queries. This replaced the prior Twikit/cookie-based scraper.
 
-- **Whoop:** OAuth/API-based fetcher.
-- **Vitals:** API reader for manually maintained Google Sheet logs.
-- **Social Expert Intel:** Uses `twikit` to perform API-style requests for X/Twitter activity without Chrome or Selenium.
-- **Nutrition:** Uses a `requests.Session()` login flow for MyNetDiary, then downloads yearly exports directly from `exportData.do?year=YYYY`. No Chrome, ChromeDriver, Selenium, or manually copied session cookies are required.
-
-### Storage & Delivery
-
-- **Storage:** Private AWS S3 data lake.
-- **Analysis:** `biostack_analyst.py` flattens and summarizes datasets into a token-optimized BioStack Brief.
-- **Delivery:** `biostack_drive.py` uploads the resulting brief to Google Drive.
-
-## Security & Persistence
-
-- Keep all credentials and tokens out of git.
-- `.env` stores secrets such as:
-  - `AWS_ACCESS_KEY_ID`
-  - `AWS_SECRET_ACCESS_KEY`
-  - `BIOSTACK_BUCKET_NAME`
-  - `MYNETDIARY_USER`
-  - `MYNETDIARY_PASS`
-  - `MYNETDIARY_REMEMBER_ME`
-  - `TWITTER_USERNAME`
-  - `TWITTER_EMAIL`
-  - `TWITTER_PASSWORD`
-- `twitter_cookies.json` may contain an active X/Twitter session and must remain private.
-- MyNetDiary no longer relies on a copied browser cookie. The script authenticates directly with username/password and stores the returned session in memory for the current run.
+### Security & Persistence
+* **Official X API Auth:** `biostack_social.py` uses `X_BEARER_TOKEN` from a developer App attached to an X Project with active API access.
+* **No X Cookies / No Password Fallback:** Social ingestion no longer uses `twitter_cookies.json`, `TWITTER_USERNAME`, `TWITTER_EMAIL`, or `TWITTER_PASSWORD`.
+* **S3 Cache:** Social ingestion maintains `social/social_cache.json` in S3 plus a local `social_cache.json` to persist per-handle `since_id` state and avoid paying to re-read the same posts.
+* **Private Data Lake:** Raw and processed outputs are written to the configured private AWS S3 bucket.
+* **Secrets:** `.env`, token files, cookies, and local caches must remain ignored by git.
 
 ## Data Dictionary & Constraints
 
 ### 1. Whoop (`biostack_whoop.py`)
-
-- Fetches physiological metrics from the Whoop API.
-- Uses OAuth token persistence through local token files.
-- Token files must be ignored by git.
+* **Ingestion:** Pulls Whoop data through OAuth2/API.
+* **Persistence:** Stores raw normalized data in S3 for downstream analysis.
+* **Constraint:** Requires valid OAuth token lifecycle handling.
 
 ### 2. Social Expert Intel (`biostack_social.py`)
+* **Ingestion:** Fetches recent public posts from high-signal X accounts using the official X API v2 Recent Search endpoint.
+* **Query Pattern:** Uses `from:<handle>` plus `-is:retweet` and `-is:reply` by default to reduce noise and API cost.
+* **Authentication:** Requires `X_BEARER_TOKEN` only. The token must come from an X developer App attached to a Project with active API access.
+* **Cost Controls:**
+  * Defaults to `--max-results 10` and `--max-pages 1` per handle.
+  * Uses cached `since_id` per handle after the first run so repeat runs return only newer posts.
+  * Uses S3 cache (`social/social_cache.json`) to keep state across machines and cron executions.
+  * Supports `--force-full-scan`, but this can increase API spend.
+* **Output:** Writes daily merged JSON to `s3://<BIOSTACK_BUCKET_NAME>/social/social_intel_YYYYMMDD.json` using UTC dates.
+* **Important Constraint:** Do not reintroduce Twikit, username/password login, or browser-exported X cookies for this collector.
 
-- Fetches selected high-signal X/Twitter timelines and replies via API simulation.
-- Uses `twikit`, avoiding browser overhead.
-- Handles rate limits with backoff timers and `TooManyRequests` handling.
-- Authentication prioritizes local JSON cookies and can fall back to environment-stored credentials if configured.
+### 3. Nutrition & Vitals (`biostack_nutrition.py`, `biostack_vitals.py`)
+* **Smart Ingestion:** Nutrition supports multi-year merge logic and handles Dec-Jan transitions by downloading year-end exports and merging in memory before S3 upload.
+* **Resource Management:** Selenium is still required for MyNetDiary only; it should remain isolated from the social collector.
+* **Vitals:** Reads manual health logs such as BP/weight from Google Sheets or configured API sources.
 
-### 3. Nutrition (`biostack_nutrition.py`)
+### 4. Analyst (`biostack_analyst.py`)
+* **Purpose:** Pulls S3 data, flattens datasets, aggregates nutrition/vitals/whoop metrics, and correlates expert protocols against personal biometrics.
+* **Output:** Produces token-optimized BioStack briefs for downstream LLM analysis.
 
-- Logs in to MyNetDiary using a direct HTTP flow.
-- Opens the login page to establish initial cookies, then posts credentials to the MyNetDiary sign-in endpoint.
-- Downloads one export per required year from `exportData.do?year=YYYY`.
-- Supports **Multi-Year Merge Logic** for date ranges crossing year boundaries, such as Dec–Jan.
-- Merges yearly files in memory, filters rows to the requested date range, and uploads JSON to S3 under:
+### 5. Delivery (`biostack_drive.py`)
+* **Purpose:** Uploads the generated BioStack Brief to Google Drive.
 
-```text
-nutrition/nutrition_YYYYMMDD_to_YYYYMMDD.json
+## Operational Defaults
+
+### Social Collector Normal Run
+```bash
+python biostack_social.py --days 7 --max-results 10 --max-pages 1
 ```
 
-### 4. Vitals (`biostack_vitals.py`)
+### Social Collector First Backfill / Fuller Catch-Up
+Use sparingly because it can return more paid resources:
+```bash
+python biostack_social.py --days 7 --max-results 10 --max-pages 3 --debug
+```
 
-- Reads manual logs such as blood pressure, weight, and related health markers from Google Sheets.
-- Uploads normalized records to the data lake.
+### X API Verification
+```bash
+set -a
+source .env
+set +a
 
-### 5. Analyst (`biostack_analyst.py`)
+curl "https://api.x.com/2/users/by/username/xdevelopers" \
+  -H "Authorization: Bearer $X_BEARER_TOKEN"
+```
 
-- Pulls S3 data, normalizes records, aggregates nutrition, and prepares LLM-ready summaries.
-- Should avoid hallucinating medical conclusions. Flag correlations as hypotheses unless strongly supported by the data.
+Expected success shape:
+```json
+{"data":{"id":"2244994945","name":"Developers","username":"XDevelopers"}}
+```
 
-### 6. Drive Delivery (`biostack_drive.py`)
+## Environment Variables
 
-- Uploads the generated BioStack Brief to Google Drive for easy reuse.
+Required for social ingestion:
+```bash
+BIOSTACK_BUCKET_NAME=biostack-data-lake
+X_FOLLOW_LIST=bryan_johnson,hubermanlab
+X_BEARER_TOKEN=your_project_attached_x_api_bearer_token
+```
 
-## Resource Management
+Optional social tuning:
+```bash
+BIOSTACK_SOCIAL_CACHE_KEY=social/social_cache.json
+BIOSTACK_SOCIAL_OUTPUT_PREFIX=social
+X_MAX_RESULTS=10
+X_MAX_PAGES=1
+```
 
-The pipeline is intended to run on small AWS EC2 instances such as `t2.micro` / `t3.micro`.
+Deprecated for social ingestion:
+```bash
+TWITTER_USERNAME=
+TWITTER_EMAIL=
+TWITTER_PASSWORD=
+twitter_cookies.json
+```
 
-- **Social:** No Chrome. Low memory footprint through `twikit`.
-- **Nutrition:** No Chrome. Direct HTTP login/export with `requests`.
-- **S3 Uploads:** Keep outputs compact JSON.
-- **Retries:** Prefer clean failure messages over silent partial uploads.
+## Git Hygiene
 
-## Operational Notes
-
-- Use `./run_all.sh` for standard orchestration.
-- Use `--days`, `--start`, and `--end` for date range control when supported by the underlying scripts.
-- Before committing, verify `.gitignore` covers:
-  - `.env`
-  - `twitter_cookies.json`
-  - `*_token.json`
-  - `temp_downloads/`
-  - `logs/`
-  - `*.xls`
-  - `*.xlsx`
+Ensure these are ignored:
+```gitignore
+.env
+social_cache.json
+twitter_cookies.json
+*_token.json
+```
