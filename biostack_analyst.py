@@ -116,9 +116,20 @@ def clean_whoop_cycles(df):
     return clean_df
 
 def to_minified_json(df):
-    if df.empty: return "[]"
-    df = df.round(2)
-    return df.to_json(orient='records')
+    """Serialize DataFrame records compactly without Pandas datetime warnings."""
+    if df.empty:
+        return "[]"
+
+    df = df.copy()
+
+    # Only numeric columns can be rounded safely. Datetime/timedelta columns emit
+    # warnings in newer Pandas versions when passed through DataFrame.round().
+    numeric_cols = df.select_dtypes(include='number').columns
+    if len(numeric_cols) > 0:
+        df[numeric_cols] = df[numeric_cols].round(2)
+
+    # Pandas 4 deprecates the implicit epoch default for datetime JSON output.
+    return df.to_json(orient='records', date_format='iso')
 
 def load_template_string(path):
     """ Safe Loader for Template """

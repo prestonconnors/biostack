@@ -45,6 +45,7 @@ Maintain a high-integrity Personal Health Data Lake (PHDL) that correlates objec
 ### 4. Analyst (`biostack_analyst.py`)
 * **Purpose:** Pulls S3 data, flattens datasets, aggregates nutrition/vitals/whoop metrics, and correlates expert protocols against personal biometrics.
 * **Output:** Produces token-optimized BioStack briefs for downstream LLM analysis.
+* **Serialization Constraint:** `to_minified_json()` should round numeric columns only and serialize datetimes with `date_format='iso'` to stay compatible with newer Pandas/Pandas 4 behavior.
 
 ### 5. Delivery (`biostack_drive.py`)
 * **Purpose:** Uploads the generated BioStack Brief to Google Drive.

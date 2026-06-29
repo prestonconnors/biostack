@@ -8,7 +8,7 @@
 2. **Expert Intel**: Scans high-signal X accounts such as Bryan Johnson and Huberman Lab using the official **X API v2**. The social collector uses Bearer Token auth, Recent Search, and `since_id` caching to keep API usage cost-effective.
 3. **Smart Nutrition**: The MyNetDiary scraper is Selenium-based and supports cross-year fetching. It detects ranges spanning year boundaries, downloads multiple export files in one session, and merges them into a unified dataset.
 4. **Storage**: Raw and normalized JSON data is stored in a private AWS S3 data lake.
-5. **The Analyst**: Pulls S3 data, flattens datasets, aggregates nutrition and biometrics, and correlates expert protocols against user data.
+5. **The Analyst**: Pulls S3 data, flattens datasets, aggregates nutrition and biometrics, and correlates expert protocols against user data. Analyst JSON output is Pandas 4-friendly: numeric columns are rounded selectively, and datetimes are serialized as ISO strings.
 6. **Delivery**: Uploads a token-optimized BioStack Brief to Google Drive for LLM review.
 
 ## 📂 Repository Structure
@@ -202,6 +202,12 @@ twitter_cookies.json
 ```
 
 `twitter_cookies.json` is deprecated for social intel, but it should still be ignored if it exists from older Twikit-based runs.
+
+## 🧯 Troubleshooting
+
+### Pandas datetime JSON warnings from the analyst
+
+If you see warnings like `obj.round has no effect with datetime` or `default 'epoch' date format is deprecated`, use the current `biostack_analyst.py`. Its compact JSON serializer rounds only numeric columns and explicitly writes datetime values with `date_format='iso'`.
 
 ## 📄 License
 
