@@ -10,6 +10,7 @@ biostack_prompt.txt
 # --- Temporary Data ---
 temp_downloads/
 __pycache__/
+logs.txt
 
 # --- Virtual Environment (Don't upload library files) ---
 venv/
