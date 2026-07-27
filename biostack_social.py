@@ -40,6 +40,13 @@ load_dotenv()
 
 X_API_BASE = "https://api.x.com/2"
 
+# Twitter/X Post IDs are Snowflake IDs. Decoding the timestamp lets us avoid
+# sending stale since_id values to the Recent Search endpoint, which only covers
+# the last 7 days.
+TWITTER_SNOWFLAKE_EPOCH_MS = 1288834974657
+RECENT_SEARCH_MAX_LOOKBACK_DAYS = 7
+RECENT_SEARCH_SAFETY_MARGIN = timedelta(minutes=5)
+
 BEARER_TOKEN = (
     os.getenv("X_BEARER_TOKEN")
     or os.getenv("X_API_BEARER_TOKEN")
@@ -62,6 +69,14 @@ HANDLES = [
     for h in os.getenv("X_FOLLOW_LIST", "").split(",")
     if h.strip()
 ]
+
+
+class XApiError(RuntimeError):
+    def __init__(self, status_code: int, message: str, payload: Dict[str, Any]):
+        super().__init__(f"X API error {status_code}: {message}")
+        self.status_code = status_code
+        self.message = message
+        self.payload = payload
 
 
 def get_args() -> argparse.Namespace:
@@ -160,6 +175,51 @@ def normalize_handle(handle: str) -> str:
     return handle.strip().lstrip("@").lower()
 
 
+def clean_post_id(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+
+    text = str(value).strip()
+
+    # X documents Post IDs as numeric strings up to 19 digits.
+    if not text.isdigit() or len(text) > 19:
+        return None
+
+    return text
+
+
+def snowflake_to_datetime(post_id: Any) -> Optional[datetime]:
+    post_id = clean_post_id(post_id)
+
+    if not post_id:
+        return None
+
+    try:
+        timestamp_ms = (int(post_id) >> 22) + TWITTER_SNOWFLAKE_EPOCH_MS
+        return datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+    except Exception:
+        return None
+
+
+def recent_search_floor() -> datetime:
+    # Keep a small margin inside the 7-day boundary to avoid off-by-seconds
+    # failures caused by local/API clock differences.
+    return (
+        now_utc()
+        - timedelta(days=RECENT_SEARCH_MAX_LOOKBACK_DAYS)
+        + RECENT_SEARCH_SAFETY_MARGIN
+    )
+
+
+def is_usable_recent_since_id(since_id: Any) -> bool:
+    created_at = snowflake_to_datetime(since_id)
+
+    if not created_at:
+        return False
+
+    return recent_search_floor() <= created_at <= now_utc() + RECENT_SEARCH_SAFETY_MARGIN
+
+
 def get_s3_client():
     return boto3.client("s3")
 
@@ -193,11 +253,13 @@ def normalize_cache(cache: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             seen_ids = []
 
         normalized_handles[h] = {
-            "since_id": data.get("since_id"),
-            "seen_ids": [str(x) for x in seen_ids][-500:],
+            "since_id": clean_post_id(data.get("since_id")),
+            "seen_ids": [str(x) for x in seen_ids if clean_post_id(x)][-500:],
             "last_checked_at": data.get("last_checked_at"),
             "last_result_count": data.get("last_result_count", 0),
             "last_capped_at": data.get("last_capped_at"),
+            "last_since_id_reset_at": data.get("last_since_id_reset_at"),
+            "last_since_id_reset_reason": data.get("last_since_id_reset_reason"),
         }
 
     cache["handles"] = normalized_handles
@@ -318,14 +380,21 @@ def make_session() -> requests.Session:
 
 
 def format_x_api_error(response: requests.Response, payload: Dict[str, Any]) -> str:
-    if "detail" in payload:
-        return payload["detail"]
+    parts = []
 
-    if "title" in payload or "reason" in payload:
-        return json.dumps(payload, indent=2)
+    for key in ("title", "detail", "reason"):
+        value = payload.get(key)
 
-    if "errors" in payload:
-        return json.dumps(payload["errors"], indent=2)
+        if value:
+            parts.append(str(value))
+
+    errors = payload.get("errors")
+
+    if errors:
+        parts.append(f"errors={json.dumps(errors, indent=2)}")
+
+    if parts:
+        return " | ".join(parts)
 
     return json.dumps(payload, indent=2)
 
@@ -360,8 +429,10 @@ def x_get(
         payload = {"raw_response": response.text[:1000]}
 
     if not response.ok:
-        raise RuntimeError(
-            f"X API error {response.status_code}: {format_x_api_error(response, payload)}"
+        raise XApiError(
+            status_code=response.status_code,
+            message=format_x_api_error(response, payload),
+            payload=payload,
         )
 
     return payload
@@ -394,6 +465,8 @@ def get_handle_cache(cache: Dict[str, Any], handle: str) -> Dict[str, Any]:
             "last_checked_at": None,
             "last_result_count": 0,
             "last_capped_at": None,
+            "last_since_id_reset_at": None,
+            "last_since_id_reset_reason": None,
         },
     )
 
@@ -402,7 +475,10 @@ def get_handle_cache(cache: Dict[str, Any], handle: str) -> Dict[str, Any]:
 
 def choose_start_time(days: int) -> str:
     safe_days = clamp_days(days)
-    return iso_utc(now_utc() - timedelta(days=safe_days))
+    requested_start = now_utc() - timedelta(days=safe_days)
+    safe_floor = recent_search_floor()
+    start = max(requested_start, safe_floor)
+    return iso_utc(start)
 
 
 def tweet_text(tweet: Dict[str, Any]) -> str:
@@ -478,20 +554,38 @@ def fetch_recent_posts_for_handle(
         ),
     }
 
-    since_id = handle_state.get("since_id")
+    since_id = clean_post_id(handle_state.get("since_id"))
 
-    if since_id and not args.force_full_scan:
+    if since_id and not args.force_full_scan and is_usable_recent_since_id(since_id):
         params["since_id"] = since_id
 
         if args.debug:
-            print(f"   using cached since_id={since_id}")
+            since_dt = snowflake_to_datetime(since_id)
+            since_label = iso_utc(since_dt) if since_dt else "unknown time"
+            print(f"   using cached since_id={since_id} ({since_label})")
 
     else:
-        params["start_time"] = choose_start_time(args.days)
+        start_time = choose_start_time(args.days)
+        params["start_time"] = start_time
 
-        if args.force_full_scan:
+        if since_id and not args.force_full_scan:
+            since_dt = snowflake_to_datetime(since_id)
+            since_label = iso_utc(since_dt) if since_dt else "invalid ID"
+            handle_state["since_id"] = None
+            handle_state["last_since_id_reset_at"] = iso_utc(now_utc())
+            handle_state["last_since_id_reset_reason"] = (
+                f"cached since_id {since_id} was outside Recent Search window ({since_label})"
+            )
+
+            print(
+                f"   ⚠️ Cached since_id={since_id} is not usable for Recent Search "
+                f"({since_label}). Falling back to start_time={start_time}."
+            )
+
+        elif args.force_full_scan:
             print(f"   ⚠️ Force full scan for @{handle_norm}; ignoring cached since_id.")
-        elif args.days > 7:
+
+        if args.days > RECENT_SEARCH_MAX_LOOKBACK_DAYS:
             print("   ℹ️ Recent Search only covers the last 7 days. Capping lookback to 7 days.")
 
     all_tweets: List[Dict[str, Any]] = []
@@ -506,12 +600,38 @@ def fetch_recent_posts_for_handle(
         if next_token:
             page_params["next_token"] = next_token
 
-        payload = x_get(
-            session=session,
-            path="/tweets/search/recent",
-            params=page_params,
-            debug=args.debug,
-        )
+        try:
+            payload = x_get(
+                session=session,
+                path="/tweets/search/recent",
+                params=page_params,
+                debug=args.debug,
+            )
+        except XApiError as e:
+            if e.status_code == 400 and page_num == 1 and "since_id" in page_params:
+                rejected_since_id = params.pop("since_id", None)
+                start_time = choose_start_time(args.days)
+                params["start_time"] = start_time
+                handle_state["since_id"] = None
+                handle_state["last_since_id_reset_at"] = iso_utc(now_utc())
+                handle_state["last_since_id_reset_reason"] = (
+                    f"cached since_id {rejected_since_id} was rejected by X API 400"
+                )
+
+                print(
+                    f"   ⚠️ X rejected cached since_id={rejected_since_id}; "
+                    f"retrying @{handle_norm} with start_time={start_time}."
+                )
+
+                page_params = dict(params)
+                payload = x_get(
+                    session=session,
+                    path="/tweets/search/recent",
+                    params=page_params,
+                    debug=args.debug,
+                )
+            else:
+                raise
 
         data = payload.get("data") or []
         meta = payload.get("meta") or {}
@@ -539,12 +659,18 @@ def dedupe_new_tweets(
     cache: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
     handle_state = get_handle_cache(cache, handle)
-    seen_ids = set(str(x) for x in handle_state.get("seen_ids", []))
+    existing_seen = [
+        str(x)
+        for x in handle_state.get("seen_ids", [])
+        if clean_post_id(x)
+    ]
+    seen_ids = set(existing_seen)
+    new_seen_in_order = []
 
     deduped = []
 
     for tweet in tweets:
-        tweet_id = str(tweet.get("id"))
+        tweet_id = clean_post_id(tweet.get("id"))
 
         if not tweet_id:
             continue
@@ -553,11 +679,12 @@ def dedupe_new_tweets(
             continue
 
         seen_ids.add(tweet_id)
+        new_seen_in_order.append(tweet_id)
         deduped.append(tweet)
 
     deduped.sort(key=lambda t: int(t["id"]), reverse=True)
 
-    handle_state["seen_ids"] = list(seen_ids)[-500:]
+    handle_state["seen_ids"] = (existing_seen + new_seen_in_order)[-500:]
 
     return deduped
 
