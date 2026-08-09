@@ -9,6 +9,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BUCKET_NAME = os.getenv('BIOSTACK_BUCKET_NAME')
+SOCIAL_OUTPUT_PREFIX = os.getenv('BIOSTACK_SOCIAL_OUTPUT_PREFIX', 'social').strip('/')
+SOCIAL_INTEL_FILENAME_PREFIX = 'social_intel_'
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -28,10 +30,15 @@ def get_s3_client():
         region_name='us-east-1'
     )
 
-def get_latest_file_content(s3, folder):
-    """ Reads newest S3 JSON file """
+def get_latest_file_content(s3, folder, filename_prefix=None):
+    """Read the newest S3 JSON file matching an optional filename prefix."""
     try:
-        response = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix=folder)
+        folder = folder.strip('/')
+        key_prefix = f"{folder}/"
+        if filename_prefix:
+            key_prefix += filename_prefix
+
+        response = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix=key_prefix)
         if 'Contents' not in response:
             return None 
         files = sorted(response['Contents'], key=lambda x: x['LastModified'])
@@ -186,7 +193,11 @@ def main():
         prompt_data.append(f"<data name='vitals'>\n{to_minified_json(df_vitals)}\n</data>")
 
     # --- 4. SOCIAL TWEETS ---
-    raw_social = get_latest_file_content(s3, 'social')
+    raw_social = get_latest_file_content(
+        s3,
+        SOCIAL_OUTPUT_PREFIX,
+        filename_prefix=SOCIAL_INTEL_FILENAME_PREFIX,
+    )
     if raw_social:
         # We don't need much filtering here as the fetcher already did it
         prompt_data.append(f"<data name='social_expert_feed'>\n{json.dumps(raw_social)}\n</data>")
