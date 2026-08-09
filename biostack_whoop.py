@@ -4,6 +4,7 @@ import requests
 import boto3
 import argparse
 import secrets
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
@@ -30,6 +31,7 @@ ENDPOINTS = {
 
 # IMPORTANT: 'offline' scope allows for unattended 24/7 background refreshing
 SCOPES = "read:recovery read:cycles read:sleep read:workout offline"
+REFRESH_SCOPE = "offline"
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -81,7 +83,8 @@ def refresh_access_token():
         'refresh_token': tokens['refresh_token'],
         'client_id': CLIENT_ID,
         'client_secret': CLIENT_SECRET,
-        'scope': SCOPES
+        # WHOOP requires only the offline scope during token refresh.
+        'scope': REFRESH_SCOPE
     }
     
     r = requests.post(TOKEN_URL, data=payload)
@@ -175,40 +178,35 @@ def fetch_all_metrics(start, end):
         print(f"   Downloading '{key}'...", end=" ")
         params = {'start': start_str, 'end': end_str, 'limit': 25} 
         
-        try:
-            all_records = []
-            next_token = None
-            
-            while True:
-                if next_token:
-                    params['nextToken'] = next_token
-                
-                # USE THE ROBUST REQUESTER
-                res = make_request_with_retry(url, params)
-                
-                if res.status_code == 429:
-                    print("RATE LIMITED. Sleeping 5s...", end=" ")
-                    time.sleep(5)
-                    continue
-                    
-                if res.status_code != 200:
-                    print(f"❌ Error {res.status_code}: {res.text}")
-                    break
-                    
-                page_data = res.json()
-                records = page_data.get('records', [])
-                all_records.extend(records)
-                
-                next_token = page_data.get('next_token')
-                if not next_token:
-                    break
-            
-            combined_data[key] = all_records
-            print(f"✅ Got {len(all_records)}")
-            
-        except Exception as e:
-            print(f"⚠️ Exception: {e}")
-            combined_data[key] = []
+        all_records = []
+        next_token = None
+
+        while True:
+            if next_token:
+                params['nextToken'] = next_token
+
+            res = make_request_with_retry(url, params)
+
+            if res.status_code == 429:
+                print("RATE LIMITED. Sleeping 5s...", end=" ")
+                time.sleep(5)
+                continue
+
+            if res.status_code != 200:
+                raise RuntimeError(
+                    f"WHOOP '{key}' request failed {res.status_code}: {res.text}"
+                )
+
+            page_data = res.json()
+            records = page_data.get('records', [])
+            all_records.extend(records)
+
+            next_token = page_data.get('next_token')
+            if not next_token:
+                break
+
+        combined_data[key] = all_records
+        print(f"✅ Got {len(all_records)}")
 
     return combined_data
 
@@ -244,7 +242,10 @@ def main():
         data = fetch_all_metrics(start_date, end_date)
         upload_to_aws(data, start_date, end_date)
     except Exception as e:
-        print(f"Script Error: {e}")
+        print(f"❌ WHOOP gather failed; no data was uploaded: {e}")
+        return 1
+
+    return 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
