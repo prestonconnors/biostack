@@ -2,7 +2,7 @@
 .env
 credentials.json
 google_token.json
-whoop_tokens.json
+whoop_tokens.json*
 drive_token.json
 twitter_cookies.json
 biostack_prompt.txt

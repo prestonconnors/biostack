@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -euo pipefail
+
 # ------------------------------------------------------------------
 # BioStack Master Orchestrator 🧬
 # 
@@ -42,30 +44,30 @@ source venv/bin/activate
 # 5. Execute Gatherers (Sequential execution to save RAM on small AWS instances)
 echo ""
 echo "1️⃣  [Gather] Whoop Wearable Data..."
-python biostack_whoop.py --days $DAYS
+python biostack_whoop.py --days "$DAYS"
 
 echo ""
 echo "2️⃣  [Gather] Social Expert Intel..."
-python biostack_social.py --days $DAYS
+python biostack_social.py --days "$DAYS"
 
 echo ""
 echo "3️⃣  [Gather] Nutrition Logs (MyNetDiary)..."
-python biostack_nutrition.py --days $DAYS
+python biostack_nutrition.py --days "$DAYS"
 
 echo ""
 echo "4️⃣  [Gather] Vitals (Google Sheets)..."
-python biostack_vitals.py --days $DAYS
+python biostack_vitals.py --days "$DAYS"
 
 # 6. Execute Analyst (The Transformation Layer)
 echo ""
 echo "5️⃣  [Analyst] Generating Contextual Prompt..."
 # Passing the template argument to the python script
-python biostack_analyst.py --days $DAYS --template "$TEMPLATE"
+python biostack_analyst.py --days "$DAYS" --template "$TEMPLATE"
 
 # 7. Delivery
 echo ""
 echo "6️⃣  [Drive] Uploading Brief to Cloud..."
-python biostack_drive.py --days $DAYS
+python biostack_drive.py --days "$DAYS"
 
 echo ""
 echo "🚀 BioStack Run Complete."
