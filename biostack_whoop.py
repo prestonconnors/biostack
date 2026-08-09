@@ -64,6 +64,7 @@ def save_tokens(token_data):
     
     with open(TOKEN_FILE, 'w') as f:
         json.dump(final_data, f)
+    os.chmod(TOKEN_FILE, 0o600)
 
 def load_tokens():
     if not os.path.exists(TOKEN_FILE): return None

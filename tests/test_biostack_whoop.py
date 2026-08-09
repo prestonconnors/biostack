@@ -1,10 +1,34 @@
 import argparse
 import io
+import json
+import os
+import stat
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from unittest.mock import Mock, patch
 
 import biostack_whoop
+
+
+class SaveTokensTests(unittest.TestCase):
+    @patch.object(biostack_whoop, "load_tokens", return_value={})
+    def test_token_file_is_owner_readable_only(self, _mock_load_tokens):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            token_file = os.path.join(temp_dir, "whoop_tokens.json")
+            with patch.object(biostack_whoop, "TOKEN_FILE", token_file):
+                biostack_whoop.save_tokens(
+                    {
+                        "access_token": "access-token",
+                        "refresh_token": "refresh-token",
+                    }
+                )
+
+            with open(token_file) as saved_file:
+                saved_tokens = json.load(saved_file)
+
+            self.assertEqual(saved_tokens["refresh_token"], "refresh-token")
+            self.assertEqual(stat.S_IMODE(os.stat(token_file).st_mode), 0o600)
 
 
 class RefreshAccessTokenTests(unittest.TestCase):
