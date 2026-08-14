@@ -3,7 +3,7 @@ import json
 import boto3
 import argparse
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -11,6 +11,7 @@ load_dotenv()
 BUCKET_NAME = os.getenv('BIOSTACK_BUCKET_NAME')
 SOCIAL_OUTPUT_PREFIX = os.getenv('BIOSTACK_SOCIAL_OUTPUT_PREFIX', 'social').strip('/')
 SOCIAL_INTEL_FILENAME_PREFIX = 'social_intel_'
+SOCIAL_HISTORY_COLLECTION_LAG_DAYS = 7
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -50,6 +51,128 @@ def get_latest_file_content(s3, folder, filename_prefix=None):
     except Exception as e:
         print(f"⚠️  Error reading {folder}: {e}")
         return None
+
+
+def parse_social_timestamp(value):
+    """Parse an X post timestamp and normalize it to naive UTC."""
+    if not value:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    except (TypeError, ValueError):
+        return None
+
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
+    return parsed
+
+
+def get_social_intel_for_range(s3, start_date, end_date):
+    """Merge stored daily social-intel files and keep posts in the date range."""
+    folder = SOCIAL_OUTPUT_PREFIX.strip('/')
+    key_prefix = f"{folder}/{SOCIAL_INTEL_FILENAME_PREFIX}"
+    objects = []
+    continuation_token = None
+
+    try:
+        while True:
+            request = {'Bucket': BUCKET_NAME, 'Prefix': key_prefix}
+            if continuation_token:
+                request['ContinuationToken'] = continuation_token
+
+            response = s3.list_objects_v2(**request)
+            objects.extend(response.get('Contents', []))
+
+            if not response.get('IsTruncated'):
+                break
+
+            continuation_token = response.get('NextContinuationToken')
+            if not continuation_token:
+                break
+    except Exception as e:
+        print(f"⚠️  Error listing social history: {e}")
+        return None
+
+    start_day = start_date.date()
+    end_day = end_date.date()
+    last_collection_day = end_day + timedelta(
+        days=SOCIAL_HISTORY_COLLECTION_LAG_DAYS
+    )
+    selected_files = []
+
+    for item in objects:
+        key = item.get('Key', '')
+        filename = key.rsplit('/', 1)[-1]
+
+        try:
+            file_day = datetime.strptime(
+                filename,
+                f"{SOCIAL_INTEL_FILENAME_PREFIX}%Y%m%d.json",
+            ).date()
+        except ValueError:
+            continue
+
+        if start_day <= file_day <= last_collection_day:
+            selected_files.append((file_day, key))
+
+    if not selected_files:
+        print(
+            f"⚠️ No stored social intel found between "
+            f"{start_day} and {end_day}."
+        )
+        return None
+
+    window_start = datetime.combine(start_day, datetime.min.time())
+    window_end = datetime.combine(end_day + timedelta(days=1), datetime.min.time())
+    posts_by_handle = {}
+
+    for _file_day, key in sorted(selected_files):
+        print(f"   Reading social history: {key}...")
+
+        try:
+            obj = s3.get_object(Bucket=BUCKET_NAME, Key=key)
+            payload = json.loads(obj['Body'].read().decode('utf-8'))
+        except Exception as e:
+            print(f"⚠️  Error reading social history file {key}: {e}")
+            continue
+
+        if not isinstance(payload, dict):
+            continue
+
+        for handle, posts in payload.items():
+            if not isinstance(posts, list):
+                continue
+
+            handle_posts = posts_by_handle.setdefault(handle, {})
+
+            for post in posts:
+                if not isinstance(post, dict):
+                    continue
+
+                timestamp = parse_social_timestamp(post.get('ts'))
+                if timestamp is None or not (window_start <= timestamp < window_end):
+                    continue
+
+                post_key = str(
+                    post.get('id')
+                    or post.get('url')
+                    or json.dumps(post, sort_keys=True)
+                )
+                handle_posts[post_key] = post
+
+    merged = {
+        handle: sorted(posts.values(), key=lambda post: post.get('ts', ''), reverse=True)
+        for handle, posts in posts_by_handle.items()
+        if posts
+    }
+    post_count = sum(len(posts) for posts in merged.values())
+    print(
+        f"   Loaded {post_count} stored social posts from "
+        f"{len(selected_files)} file(s)."
+    )
+    return merged or None
 
 # --- POWER TOOLS: PRE-PROCESSING FUNCTIONS ---
 
@@ -193,13 +316,8 @@ def main():
         prompt_data.append(f"<data name='vitals'>\n{to_minified_json(df_vitals)}\n</data>")
 
     # --- 4. SOCIAL TWEETS ---
-    raw_social = get_latest_file_content(
-        s3,
-        SOCIAL_OUTPUT_PREFIX,
-        filename_prefix=SOCIAL_INTEL_FILENAME_PREFIX,
-    )
+    raw_social = get_social_intel_for_range(s3, start_date, end_date)
     if raw_social:
-        # We don't need much filtering here as the fetcher already did it
         prompt_data.append(f"<data name='social_expert_feed'>\n{json.dumps(raw_social)}\n</data>")
 
     # --- 5. CONSTRUCT PROMPT FROM TEMPLATE ---
