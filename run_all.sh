@@ -2,6 +2,11 @@
 
 set -euo pipefail
 
+# Resolve relative paths from this script's directory so the pipeline works
+# regardless of the caller's current working directory.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
 # ------------------------------------------------------------------
 # BioStack Master Orchestrator 🧬
 # 
@@ -12,7 +17,7 @@ set -euo pipefail
 # ------------------------------------------------------------------
 
 # 1. Set Defaults
-TEMPLATE="/home/preston/biostack/templates/default_coach.txt"
+TEMPLATE="$SCRIPT_DIR/templates/default_coach.txt"
 DAYS=7
 
 # 2. Parse Arguments
@@ -39,7 +44,7 @@ echo "📄 Prompt Template: $TEMPLATE"
 echo "=========================================="
 
 # 4. Activate Virtual Env (Optional - Uncomment if using venv)
-source venv/bin/activate
+source "$SCRIPT_DIR/venv/bin/activate"
 
 # 5. Execute Gatherers (Sequential execution to save RAM on small AWS instances)
 echo ""
