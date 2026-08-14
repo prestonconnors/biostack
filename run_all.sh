@@ -19,6 +19,38 @@ cd "$SCRIPT_DIR"
 # 1. Set Defaults
 TEMPLATE="$SCRIPT_DIR/templates/default_coach.txt"
 DAYS=7
+RETRY_ATTEMPTS="${BIOSTACK_RETRY_ATTEMPTS:-3}"
+RETRY_DELAY_SECONDS="${BIOSTACK_RETRY_DELAY_SECONDS:-30}"
+
+run_with_retry() {
+    local step_name="$1"
+    shift
+
+    local attempt=1
+    local delay="$RETRY_DELAY_SECONDS"
+    local exit_code
+
+    while true; do
+        if "$@"; then
+            if (( attempt > 1 )); then
+                echo "✅ [$step_name] Recovered on attempt $attempt/$RETRY_ATTEMPTS."
+            fi
+            return 0
+        else
+            exit_code=$?
+        fi
+
+        if (( attempt >= RETRY_ATTEMPTS )); then
+            echo "❌ [$step_name] Failed after $attempt attempt(s) (exit code $exit_code)." >&2
+            return "$exit_code"
+        fi
+
+        echo "⚠️ [$step_name] Attempt $attempt/$RETRY_ATTEMPTS failed with exit code $exit_code. Retrying in ${delay}s..." >&2
+        sleep "$delay"
+        attempt=$((attempt + 1))
+        delay=$((delay * 2))
+    done
+}
 
 # 2. Parse Arguments
 while [[ "$#" -gt 0 ]]; do
@@ -29,6 +61,16 @@ while [[ "$#" -gt 0 ]]; do
     esac
     shift
 done
+
+if ! [[ "$RETRY_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "❌ BIOSTACK_RETRY_ATTEMPTS must be a positive integer." >&2
+    exit 2
+fi
+
+if ! [[ "$RETRY_DELAY_SECONDS" =~ ^[0-9]+$ ]]; then
+    echo "❌ BIOSTACK_RETRY_DELAY_SECONDS must be a non-negative integer." >&2
+    exit 2
+fi
 
 # 3. Verify Template Exists
 if [ ! -f "$TEMPLATE" ]; then
@@ -49,30 +91,30 @@ source "$SCRIPT_DIR/venv/bin/activate"
 # 5. Execute Gatherers (Sequential execution to save RAM on small AWS instances)
 echo ""
 echo "1️⃣  [Gather] Whoop Wearable Data..."
-python biostack_whoop.py --days "$DAYS"
+run_with_retry "Whoop Gather" python biostack_whoop.py --days "$DAYS"
 
 echo ""
 echo "2️⃣  [Gather] Social Expert Intel..."
-python biostack_social.py --days "$DAYS"
+run_with_retry "Social Gather" python biostack_social.py --days "$DAYS"
 
 echo ""
 echo "3️⃣  [Gather] Nutrition Logs (MyNetDiary)..."
-python biostack_nutrition.py --days "$DAYS"
+run_with_retry "Nutrition Gather" python biostack_nutrition.py --days "$DAYS"
 
 echo ""
 echo "4️⃣  [Gather] Vitals (Google Sheets)..."
-python biostack_vitals.py --days "$DAYS"
+run_with_retry "Vitals Gather" python biostack_vitals.py --days "$DAYS"
 
 # 6. Execute Analyst (The Transformation Layer)
 echo ""
 echo "5️⃣  [Analyst] Generating Contextual Prompt..."
 # Passing the template argument to the python script
-python biostack_analyst.py --days "$DAYS" --template "$TEMPLATE"
+run_with_retry "Analyst" python biostack_analyst.py --days "$DAYS" --template "$TEMPLATE"
 
 # 7. Delivery
 echo ""
 echo "6️⃣  [Drive] Uploading Brief to Cloud..."
-python biostack_drive.py --days "$DAYS"
+run_with_retry "Drive Upload" python biostack_drive.py --days "$DAYS"
 
 echo ""
 echo "🚀 BioStack Run Complete."

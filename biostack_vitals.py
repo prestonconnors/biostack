@@ -1,5 +1,6 @@
 import os
 import json
+import sys
 import boto3
 import argparse
 import pandas as pd
@@ -76,7 +77,7 @@ def fetch_sheet_data(service):
 def process_and_upload(rows, start_date, end_date):
     if not rows:
         print("⚠️ Sheet is empty or range is invalid.")
-        return
+        return True
 
     # Row 0 is Headers
     headers = rows[0]
@@ -125,8 +126,10 @@ def process_and_upload(rows, start_date, end_date):
             print(f"✅ Success: s3://{BUCKET_NAME}/{key}")
         else:
             print("⚠️ No data matches that specific date range.")
+        return True
     else:
         print("❌ Error: Column 'Date' not found in spreadsheet.")
+        return False
 
 def main():
     args = get_args()
@@ -146,10 +149,11 @@ def main():
         service = build('sheets', 'v4', credentials=creds)
         
         rows = fetch_sheet_data(service)
-        process_and_upload(rows, start_date, end_date)
+        return 0 if process_and_upload(rows, start_date, end_date) else 1
         
     except Exception as e:
         print(f"❌ Error: {e}")
+        return 1
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -1,5 +1,6 @@
 import os
 import json
+import sys
 import time
 import argparse
 from datetime import datetime, timedelta, timezone
@@ -761,20 +762,20 @@ def merge_daily_intel(
 def upload_intel(
     master_intel: Dict[str, List[Dict[str, Any]]],
     args: argparse.Namespace,
-) -> None:
+) -> bool:
     if not master_intel:
         print("⚠️ No new social intel collected. Nothing to upload.")
-        return
+        return True
 
     if args.dry_run:
         print("🧪 Dry run: skipping S3 upload. Collected data:")
         print(json.dumps(master_intel, indent=2))
-        return
+        return True
 
     if not BUCKET_NAME:
         print("❌ S3 upload skipped: BIOSTACK_BUCKET_NAME is missing from .env")
         print(json.dumps(master_intel, indent=2))
-        return
+        return False
 
     date_str = now_utc().strftime("%Y%m%d")
     output_key = f"{OUTPUT_PREFIX}/social_intel_{date_str}.json"
@@ -791,27 +792,29 @@ def upload_intel(
         print(f"🚀 SUCCESS: s3://{BUCKET_NAME}/{output_key}")
         print(f"   New posts this run: {new_count}")
         print(f"   Total posts in daily file: {merged_count}")
+        return True
 
     except Exception as e:
         print(f"❌ S3 Upload Failed: {e}")
         print("Collected data:")
         print(json.dumps(master_intel, indent=2))
+        return False
 
 
-def main() -> None:
+def main() -> int:
     args = get_args()
 
     if not HANDLES:
         print("❌ No handles found.")
         print("   Add X_FOLLOW_LIST to your .env, for example:")
         print("   X_FOLLOW_LIST=bryan_johnson,hubermanlab")
-        return
+        return 1
 
     if not BEARER_TOKEN:
         print("❌ Missing X_BEARER_TOKEN in .env.")
         print("   Add your official X API Bearer Token:")
         print("   X_BEARER_TOKEN=...")
-        return
+        return 1
 
     print("📡 Authenticating with official X API Bearer Token...")
 
@@ -819,7 +822,7 @@ def main() -> None:
         session = make_session()
     except Exception as e:
         print(f"❌ Could not create X API session: {e}")
-        return
+        return 1
 
     cache = load_cache(args)
     master_intel: Dict[str, List[Dict[str, Any]]] = {}
@@ -892,11 +895,11 @@ def main() -> None:
 
     if success_count == 0 and error_count > 0:
         print("❌ All X API requests failed. Not updating cache or uploading intel.")
-        return
+        return 1
 
     save_cache(cache, args)
-    upload_intel(master_intel, args)
+    return 0 if upload_intel(master_intel, args) else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

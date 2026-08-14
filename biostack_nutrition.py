@@ -2,6 +2,7 @@ import os
 import re
 import glob
 import json
+import sys
 import boto3
 import argparse
 import requests
@@ -364,7 +365,7 @@ def process_and_upload(csv_paths, start_date, end_date):
 
     if not all_dfs:
         print("❌ No dataframes could be loaded.")
-        return
+        return False
 
     try:
         # 2. Merge into one Master DataFrame
@@ -390,7 +391,7 @@ def process_and_upload(csv_paths, start_date, end_date):
 
         if df.empty:
             print("⚠️ No data matches that specific date range after filtering.")
-            return
+            return True
 
         # Prepare for Upload
         # Sort just in case merging messed up order
@@ -412,9 +413,11 @@ def process_and_upload(csv_paths, start_date, end_date):
             ContentType="application/json",
         )
         print(f"✅ SUCCESS: s3://{BUCKET_NAME}/{key}")
+        return True
 
     except Exception as e:
         print(f"❌ Processing Error: {e}")
+        return False
     finally:
         # cleanup
         for f in csv_paths:
@@ -422,7 +425,7 @@ def process_and_upload(csv_paths, start_date, end_date):
                 os.remove(f)
 
 
-if __name__ == "__main__":
+def main():
     args = get_args()
     start_date, end_date = calculate_date_range(args)
 
@@ -432,6 +435,13 @@ if __name__ == "__main__":
     print(f"📅 Requested Range: {start_date.date()} -> {end_date.date()}")
     print(f"📂 Required Years: {target_years}")
 
-    file_paths = download_mynetdiary_years(target_years)
-    if file_paths:
-        process_and_upload(file_paths, start_date, end_date)
+    try:
+        file_paths = download_mynetdiary_years(target_years)
+        return 0 if process_and_upload(file_paths, start_date, end_date) else 1
+    except Exception as e:
+        print(f"❌ Nutrition gather failed: {e}")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

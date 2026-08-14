@@ -1,4 +1,5 @@
 import os
+import sys
 import argparse
 import datetime
 from googleapiclient.discovery import build
@@ -58,7 +59,7 @@ def authenticate():
 def upload_file(start_date, end_date):
     if not os.path.exists(FILENAME_LOCAL):
         print(f"❌ Error: {FILENAME_LOCAL} missing. Run analyst script first.")
-        return
+        return False
 
     # 1. Generate Dynamic Filename
     # Format: BioStack_Brief_2025-01-01_to_2025-01-08.txt
@@ -100,15 +101,17 @@ def upload_file(start_date, end_date):
         ).execute()
         print("✅ Success: Drive file created.")
 
+    return True
+
 def main():
     if not FOLDER_ID:
         print("❌ Error: GOOGLE_DRIVE_FOLDER_ID not set in .env")
-        return
+        return 1
 
     args = get_args()
     start, end = calculate_dates(args)
     
-    upload_file(start, end)
+    return 0 if upload_file(start, end) else 1
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
