@@ -173,6 +173,14 @@ Behavior:
 * Uses `since_id` after the first run so subsequent runs only fetch newer posts.
 * Stores cache locally in `social_cache.json` and remotely at `social/social_cache.json` in S3.
 * Merges multiple runs into the same daily S3 file without overwriting earlier posts.
+* Builds the analyst's requested date window from all matching daily S3 files,
+  deduplicating and filtering posts by their own timestamps.
+
+The cache stores IDs and collection state to minimize X API reads; post bodies
+are retained in the daily `social_intel_YYYYMMDD.json` objects. For example, a
+`--days 28` workflow reuses the available 28-day S3 history while the collector
+queries X only for recent posts that are not already represented by its cached
+`since_id`.
 
 For a fuller first backfill, run once with a higher page cap:
 
