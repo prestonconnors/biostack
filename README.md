@@ -138,6 +138,22 @@ Fetches the default range and uses the default coach template:
 ./run_all.sh --days 30
 ```
 
+### Workflow retries
+
+Each gather, analysis, and delivery step is attempted up to three times. Failed
+steps wait 30 seconds before the second attempt and 60 seconds before the third.
+The pipeline continues after a recovered step and stops if a step exhausts all
+attempts.
+
+Override the attempt count and initial delay with environment variables:
+
+```bash
+BIOSTACK_RETRY_ATTEMPTS=5 BIOSTACK_RETRY_DELAY_SECONDS=60 ./run_all.sh
+```
+
+Set `BIOSTACK_RETRY_ATTEMPTS=1` to disable retries. The delay doubles after each
+failed attempt.
+
 Nutrition handles year-end ranges automatically. X Recent Search supports only the recent window exposed by the X API, so the social collector is optimized for frequent small pulls rather than large historical backfills.
 
 ## 🧠 Social Intel Cost Controls
